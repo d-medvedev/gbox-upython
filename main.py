@@ -108,7 +108,7 @@ def sensor_thread():
         except Exception as e:
             print(f"Sensor reading error: {e}")
 
-        time.sleep(10)  # Измеряем каждые 5 секунд
+        time.sleep(5)  # Измеряем каждые 5 секунд
 
 # MQTT incoming messages handler
 def on_message(topic, msg):
@@ -126,7 +126,7 @@ def mqtt_thread():
     client.set_callback(on_message)
     client.connect()
     client.subscribe(MQTT_TOPIC_PWM)
-    print("Подключено к MQTT серверу")
+    print("Connected to MQTT server")
 
     while True:
         try:
@@ -142,11 +142,11 @@ def mqtt_thread():
                 client.publish(MQTT_TOPIC_CO2, str(co2))
                 client.publish(MQTT_TOPIC_TEMP, str(temperature))
                 client.publish(MQTT_TOPIC_HUM, str(humidity))
-                print("Данные отправлены на MQTT сервер")
+                print("Data sent to  MQTT")
             else:
-                print("Нет данных для отправки")
+                print("No data to send")
         except Exception as e:
-            print(f"Ошибка в MQTT потоке: {e}")
+            print(f"Error in  MQTT thread: {e}")
             try:
                 client.connect()
                 client.subscribe(MQTT_TOPIC_PWM)
@@ -171,19 +171,20 @@ def main():
 
     # Start periodic measurement
     scd40_sensor.start_measurement()
-    # _thread.start_new_thread(mqtt_thread, ())
+    _thread.start_new_thread(sensor_thread, ())
+    _thread.start_new_thread(mqtt_thread, ())
 
     # Wait for first measurement to be ready (about 5 seconds)
     time.sleep(5)
 
     while True:
-        co2, temperature, humidity = scd40_sensor.read_measurement()
+        # co2, temperature, humidity = scd40_sensor.read_measurement()
         # _, temp_ext, humid_ext = sht30_sensor.read_measurement()
-        print(f"SCD40: CO2: {co2} ppm, Temperature Int: {temperature:.2f}°C, Humidity: {humidity:.2f}%")
-        print_time()
+        # print(f"SCD40: CO2: {co2} ppm, Temperature Int: {temperature:.2f}°C, Humidity: {humidity:.2f}%")
+        # print_time()
         # print(f"SHT30: Temperature Int: {temp_ext:.2f}°C, Humidity: {humid_ext:.2f}%")
 
-        time.sleep(6)
+        time.sleep(5)
 
 if __name__ == "__main__":
     main()
