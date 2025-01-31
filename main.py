@@ -1,14 +1,15 @@
 import gc
 import time
-import struct
 from machine import SoftI2C, Pin, PWM, reset
+from machine import RTC
 import _thread
 from umqtt.simple import MQTTClient
 import network
 import ntptime
-from scd40 import SCD40
 import utime
 import urequests
+
+from envsensor import EnvSensor
 
 # Настройки Wi-Fi
 SSID        = "ELTEX-8A08"
@@ -54,50 +55,63 @@ MQTT_TOPIC_LIGHT_PWM        = "gbu_dev_3/relay/light_pwm"
 MQTT_TOPIC_REQ_ALL_SETTINGS = "gbu_dev_3/cmd/req_all"
 MQTT_TOPIC_REBOOT           = "gbu_dev_3/cmd/reboot"
 
-# Глобальные переменные
+# Global variables and objects
+latest_data = {"co2": None, "temperature": None, "humidity": None}
 data_lock = _thread.allocate_lock()
+i2c = SoftI2C(scl=Pin(33), sda=Pin(32), freq=100000)
+scd40_sensor = EnvSensor(i2c, 'SCD40')
+sht30_sensor = EnvSensor(i2c, 'SHT30')
 
-# Функции для Wi-Fi и синхронизации времени
+
+# Wifi functions
 def connect_wifi():
     wlan = network.WLAN(network.STA_IF)
     wlan.active(True)
     if not wlan.isconnected():
-        print('Подключение к Wi-Fi...')
+        print('Connecting to Wi-Fi...')
         wlan.connect(SSID, PASSWORD)
         while not wlan.isconnected():
             pass
-    print('Подключено к Wi-Fi')
-    print('IP адрес:', wlan.ifconfig()[0])
+    print('Connected to Wi-Fi')
+    print('IP address:', wlan.ifconfig()[0])
+
+# def is_wifi_connected():
+#     if wlan.isconnected():
+#         return True
 
 def sync_time():
     try:
         ntptime.settime()
-        print("Время синхронизировано с NTP сервером")
+        print("Time synced with NTP server")
     except:
-        print("Ошибка синхронизации времени")
+        print("NTP Sync Error")
 
+def time_sync_task():
+    while True:
+        sync_time()
+        # set_rtc_time()
+        utime.sleep(3600)
 
-# def sensor_thread():
-#     while True:
-#         try:
-#             co2, temperature, humidity = sensor.read_measurement()
-#
-#             if co2 is not None:
-#                 with data_lock:
-#                     latest_data["co2"] = co2
-#                     latest_data["temperature"] = temperature
-#                     latest_data["humidity"] = humidity
-#                 print(f"CO2: {co2} ppm, Температура: {temperature:.2f}°C, Влажность: {humidity:.2f}%")
-#             else:
-#                 print("Ошибка чтения данных")
-#         except Exception as e:
-#             print(f"Ошибка чтения данных: {e}")
-#
-#         time.sleep(10)  # Измеряем каждые 5 секунд
+def sensor_thread():
+    while True:
+        try:
+            co2, temperature, humidity = scd40_sensor.read_measurement()
 
-# Функция обратного вызова для обработки входящих MQTT сообщений
+            if co2 is not None:
+                with data_lock:
+                    latest_data["co2"] = co2
+                    latest_data["temperature"] = temperature
+                    latest_data["humidity"] = humidity
+                print(f"CO2: {co2} ppm, Temperature: {temperature:.2f}°C, Humidity: {humidity:.2f}%")
+            else:
+                print("Sensor reading error")
+        except Exception as e:
+            print(f"Sensor reading error: {e}")
+
+        time.sleep(10)  # Измеряем каждые 5 секунд
+
+# MQTT incoming messages handler
 def on_message(topic, msg):
-    global pwm_value
     if topic == MQTT_TOPIC_PWM.encode():
         try:
             new_pwm = int(msg)
@@ -107,58 +121,69 @@ def on_message(topic, msg):
             print(f"Получено некорректное значение PWM: {msg}")
 
 # Функция mqtt_thread
-# def mqtt_thread():
-#     client = MQTTClient(MQTT_CLIENT_ID, MQTT_HOST, MQTT_PORT)
-#     client.set_callback(on_message)
-#     client.connect()
-#     client.subscribe(MQTT_TOPIC_PWM)
-#     print("Подключено к MQTT серверу")
-#
-#     while True:
-#         try:
-#             # Проверяем наличие входящих сообщений
-#             client.check_msg()
-#
-#             with data_lock:
-#                 co2 = latest_data["co2"]
-#                 temperature = latest_data["temperature"]
-#                 humidity = latest_data["humidity"]
-#
-#             if co2 is not None:
-#                 client.publish(MQTT_TOPIC_CO2, str(co2))
-#                 client.publish(MQTT_TOPIC_TEMP, str(temperature))
-#                 client.publish(MQTT_TOPIC_HUM, str(humidity))
-#                 print("Данные отправлены на MQTT сервер")
-#             else:
-#                 print("Нет данных для отправки")
-#         except Exception as e:
-#             print(f"Ошибка в MQTT потоке: {e}")
-#             try:
-#                 client.connect()
-#                 client.subscribe(MQTT_TOPIC_PWM)
-#             except:
-#                 pass
-#
-#         time.sleep(30)  # Отправляем данные и проверяем входящие сообщения каждые 10 секунд
+def mqtt_thread():
+    client = MQTTClient(MQTT_CLIENT_ID, MQTT_HOST, MQTT_PORT)
+    client.set_callback(on_message)
+    client.connect()
+    client.subscribe(MQTT_TOPIC_PWM)
+    print("Подключено к MQTT серверу")
+
+    while True:
+        try:
+            # Проверяем наличие входящих сообщений
+            client.check_msg()
+
+            with data_lock:
+                co2 = latest_data["co2"]
+                temperature = latest_data["temperature"]
+                humidity = latest_data["humidity"]
+
+            if co2 is not None:
+                client.publish(MQTT_TOPIC_CO2, str(co2))
+                client.publish(MQTT_TOPIC_TEMP, str(temperature))
+                client.publish(MQTT_TOPIC_HUM, str(humidity))
+                print("Данные отправлены на MQTT сервер")
+            else:
+                print("Нет данных для отправки")
+        except Exception as e:
+            print(f"Ошибка в MQTT потоке: {e}")
+            try:
+                client.connect()
+                client.subscribe(MQTT_TOPIC_PWM)
+            except:
+                pass
+
+        time.sleep(30)
+
+def print_time():
+    rtc = RTC()
+    date_tuple = rtc.datetime()
+    print("Current date and time:")
+    print("{:04d}-{:02d}-{:02d} {:02d}:{:02d}:{:02d}".format(
+        date_tuple[0], date_tuple[1], date_tuple[2],
+        date_tuple[4], date_tuple[5], date_tuple[6]))
 
 # Main function
 def main():
-    # Initialize I2C - adjust pins as necessary for your board
-    i2c = SoftI2C(scl=Pin(33), sda=Pin(32), freq=50000)
 
-    # Create SCD40 object
-    scd40 = SCD40(i2c)
+    connect_wifi()
+    sync_time()
 
     # Start periodic measurement
-    scd40.start_periodic_measurement()
+    scd40_sensor.start_measurement()
+    # _thread.start_new_thread(mqtt_thread, ())
 
     # Wait for first measurement to be ready (about 5 seconds)
     time.sleep(5)
 
     while True:
-        co2, temperature, humidity = scd40.read_measurement()
-        print(f"CO2: {co2} ppm, Temperature: {temperature:.2f}°C, Humidity: {humidity:.2f}%")
-        time.sleep(7)
+        co2, temperature, humidity = scd40_sensor.read_measurement()
+        # _, temp_ext, humid_ext = sht30_sensor.read_measurement()
+        print(f"SCD40: CO2: {co2} ppm, Temperature Int: {temperature:.2f}°C, Humidity: {humidity:.2f}%")
+        print_time()
+        # print(f"SHT30: Temperature Int: {temp_ext:.2f}°C, Humidity: {humid_ext:.2f}%")
+
+        time.sleep(6)
 
 if __name__ == "__main__":
     main()
