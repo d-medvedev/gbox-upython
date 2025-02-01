@@ -7,6 +7,7 @@ from umqtt.simple import MQTTClient
 import network
 import ntptime
 import utime
+import json
 import urequests
 
 from envsensor import EnvSensor
@@ -61,6 +62,27 @@ data_lock = _thread.allocate_lock()
 i2c = SoftI2C(scl=Pin(33), sda=Pin(32), freq=100000)
 scd40_sensor = EnvSensor(i2c, 'SCD40')
 sht30_sensor = EnvSensor(i2c, 'SHT30')
+
+def save_data(data):
+    try:
+        with open('config.json', 'w') as f:
+            json.dump(data, f)
+        print("Data saved successfully")
+    except Exception as e:
+        print(f"Error saving data: {e}")
+
+def load_data():
+    try:
+        with open('config.json', 'r') as f:
+            data = json.load(f)
+        print("Data loaded successfully")
+        return data
+    except OSError:
+        print("No saved data found")
+        return {}
+    except Exception as e:
+        print(f"Error loading data: {e}")
+        return {}
 
 
 # Wifi functions
@@ -169,6 +191,13 @@ def main():
     connect_wifi()
     sync_time()
 
+    data_to_save = {
+        'day_start_hr': 6,
+        'day_duration': 18,
+        'timezone': 7
+    }
+    save_data(data_to_save)
+
     # Start periodic measurement
     scd40_sensor.start_measurement()
     _thread.start_new_thread(sensor_thread, ())
@@ -177,14 +206,13 @@ def main():
     # Wait for first measurement to be ready (about 5 seconds)
     time.sleep(5)
 
-    while True:
-        # co2, temperature, humidity = scd40_sensor.read_measurement()
-        # _, temp_ext, humid_ext = sht30_sensor.read_measurement()
-        # print(f"SCD40: CO2: {co2} ppm, Temperature Int: {temperature:.2f}°C, Humidity: {humidity:.2f}%")
-        # print_time()
-        # print(f"SHT30: Temperature Int: {temp_ext:.2f}°C, Humidity: {humid_ext:.2f}%")
+    loaded_data = load_data()
 
-        time.sleep(5)
+    for key, value in loaded_data.items():
+        print(f"{key}: {value}")
+
+    while True:
+       time.sleep(5)
 
 if __name__ == "__main__":
     main()
