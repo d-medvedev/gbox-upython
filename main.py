@@ -2,6 +2,7 @@ import gc
 import os
 import time
 
+import machine
 from machine import SoftI2C, Pin, PWM, reset
 from machine import RTC
 import _thread
@@ -18,7 +19,7 @@ from envsensor import EnvSensor
 LED_PIN = 2
 
 
-# Настройки Wi-Fi
+# Wi-Fi settings
 SSID        = "ELTEX-8A08"
 PASSWORD    = "GP21204758"
 
@@ -45,13 +46,17 @@ MQTT_TOPIC_SETTING_DAY_START_HR  = "gbu_dev_3/settings/day_start_hr"
 MQTT_TOPIC_SETTING_DAY_START_MIN = "gbu_dev_3/settings/day_start_min"
 MQTT_TOPIC_SETTING_DAY_DUR       = "gbu_dev_3/settings/day_dur"
 MQTT_TOPIC_SETTING_TIMEZONE      = "gbu_dev_3/settings/tzn"
-MQTT_TOPIC_SETTING_WTR_MAX_CNTR  = "gbu_dev_3/wtr_max_cnt"
-MQTT_TOPIC_SETTING_WTR_DUR       = "gbu_dev_3/settings/wtr_dur"
-MQTT_TOPIC_SETTING_WTR_OFFSET    = "gbu_dev_3/settings/wtr_offset"
-MQTT_TOPIC_SETTING_GLOB_AUTO     = "gbu_dev_3/settings/global_auto"
+MQTT_TOPIC_SETTING_LIGHT_PWM     = "gbu_dev_3/settings/light_pwm"
+MQTT_TOPIC_SETTING_WTR_MAX_CNTR  = "gbu_dev_3/settings/wtr_max_cnt"
+MQTT_TOPIC_SETTING_VENT_MAX_CNTR = "gbu_dev_3/settings/vent_max_cnt"
 MQTT_TOPIC_SETTING_LIGHT_AUTO    = "gbu_dev_3/settings/light_auto"
-MQTT_TOPIC_SETTING_CO2_AUTO      = "gbu_dev_3/settings/co2_auto"
 MQTT_TOPIC_SETTING_WATER_AUTO    = "gbu_dev_3/settings/water_auto"
+MQTT_TOPIC_SETTING_VENT_AUTO     = "gbu_dev_3/settings/vent_auto"
+# MQTT_TOPIC_SETTING_CO2_AUTO      = "gbu_dev_3/settings/co2_auto"
+# MQTT_TOPIC_SETTING_WTR_DUR       = "gbu_dev_3/settings/wtr_dur"
+# MQTT_TOPIC_SETTING_WTR_OFFSET    = "gbu_dev_3/settings/wtr_offset"
+# MQTT_TOPIC_SETTING_GLOB_AUTO     = "gbu_dev_3/settings/global_auto"
+
 
 # Commands topic (subscribe)
 MQTT_TOPIC_WATER_CON        = "gbu_dev_3/relay/water"
@@ -61,11 +66,17 @@ MQTT_TOPIC_LIGHT_PWM        = "gbu_dev_3/relay/light_pwm"
 MQTT_TOPIC_REQ_ALL_SETTINGS = "gbu_dev_3/cmd/req_all"
 MQTT_TOPIC_REBOOT           = "gbu_dev_3/cmd/reboot"
 
-# Status topics
+# Status topics (publish)
 MQTT_TOPIC_STATUS_DAY_START_HR  = "gbu_dev_3/status/day_start_hr"
 MQTT_TOPIC_STATUS_DAY_START_MIN = "gbu_dev_3/status/day_start_min"
 MQTT_TOPIC_STATUS_DAY_DUR       = "gbu_dev_3/status/day_dur"
 MQTT_TOPIC_STATUS_TIMEZONE      = "gbu_dev_3/status/tzn"
+MQTT_TOPIC_STATUS_LIGHT_PWM     = "gbu_dev_3/status/light_pwm"
+MQTT_TOPIC_STATUS_WTR_MAX_CNTR  = "gbu_dev_3/status/wtr_max_cnt"
+MQTT_TOPIC_STATUS_VENT_MAX_CNTR = "gbu_dev_3/status/vent_max_cnt"
+MQTT_TOPIC_STATUS_LIGHT_AUTO    = "gbu_dev_3/status/light_auto"
+MQTT_TOPIC_STATUS_WATER_AUTO    = "gbu_dev_3/status/water_auto"
+MQTT_TOPIC_STATUS_VENT_AUTO     = "gbu_dev_3/status/vent_auto"
 
 # Global variables and objects
 client = MQTTClient(MQTT_CLIENT_ID, MQTT_HOST, MQTT_PORT)
@@ -168,8 +179,18 @@ def sensor_thread():
 
         time.sleep(5)  # Измеряем каждые 5 секунд
 
+
 def time_to_minutes(time_str):
+    if time_str is None:
+        raise ValueError("Input cannot be None")
+
+    # Optional: Check if the input is in the right format
+    if not isinstance(time_str, str) or len(time_str.split(':')) != 2:
+        raise ValueError("Input must be a string in the format 'HH:MM'")
+
+    # Proceed to extract hours and minutes
     hours, minutes = map(int, time_str.split(':'))
+
     return hours * 60 + minutes
 
 # Light control class
@@ -185,10 +206,10 @@ class LightControl:
 
     def check_schedule(self):
         current_time = self.rtc.datetime()
-        offset_minutes = get_value('time_zone') * 60
+        offset_minutes = get_value('tzn') * 60
         current_minutes = (current_time[4] * 60 + current_time[5] + offset_minutes) % 1440
-        start_minutes = time_to_minutes(get_value('start_time'))
-        end_minutes = time_to_minutes(get_value('end_time'))
+        start_minutes = get_value('day_start_hr') * 60 + get_value('day_start_min')
+        end_minutes = start_minutes + get_value('day_dur') * 60
         print(f'start_minutes: {start_minutes}')
         print(f'end_minutes: {end_minutes}')
         print(f'current_minutes: {current_minutes}')
@@ -210,43 +231,202 @@ def on_message(topic, msg):
         try:
             day_start_hr = int(msg.decode())
             if 0 <= day_start_hr < 24:
-                update_value('day_start_hr', day_start_hr)
-                print(f"Время начала дня обновлено: {day_start_hr}")
+                with data_lock:
+                    update_value('day_start_hr', day_start_hr)
+                    client.publish(MQTT_TOPIC_STATUS_DAY_START_HR, str(day_start_hr))
             else:
-                raise ValueError("Значение должно быть от 0 до 23")
+                raise ValueError("Value should be in range 0-23")
         except ValueError as e:
-            print(f"Получено некорректное значение: {msg.decode()}. Ошибка: {e}")
+            print(f"Received invalid value: {msg.decode()}. Error: {e}")
     elif topic == MQTT_TOPIC_SETTING_DAY_START_MIN.encode():
         try:
             day_start_min = int(msg.decode())
             if 0 <= day_start_min < 60:
-                update_value('day_start_min', day_start_min)
-                print(f"Время начала дня обновлено: {day_start_min}")
-                client.publish(MQTT_TOPIC_STATUS_DAY_START_MIN, day_start_min)
+                with data_lock:
+                    update_value('day_start_min', day_start_min)
+                    client.publish(MQTT_TOPIC_STATUS_DAY_START_MIN, str(day_start_min))
             else:
-                raise ValueError("Значение должно быть от 0 до 23")
+                raise ValueError("Value should be in range 0-60")
         except ValueError as e:
-            print(f"Получено некорректное значение: {msg.decode()}. Ошибка: {e}")
+            print(f"Received invalid value: {msg.decode()}. Error: {e}")
+    elif topic == MQTT_TOPIC_SETTING_DAY_DUR.encode():
+        try:
+            day_dur = int(msg.decode())
+            if 0 <= day_dur < 24:
+                with data_lock:
+                    update_value('day_dur', day_dur)
+                    client.publish(MQTT_TOPIC_STATUS_DAY_DUR, str(day_dur))
+            else:
+                raise ValueError("Value should be in range 0-24")
+        except ValueError as e:
+            print(f"Received invalid value: {msg.decode()}. Error: {e}")
+    elif topic == MQTT_TOPIC_SETTING_TIMEZONE.encode():
+        try:
+            tzn = int(msg.decode())
+            if 0 <= tzn < 24:
+                with data_lock:
+                    update_value('tzn', tzn)
+                    client.publish(MQTT_TOPIC_STATUS_TIMEZONE, str(tzn))
+            else:
+                raise ValueError("Value should be in range 0-24")
+        except ValueError as e:
+            print(f"Received invalid value: {msg.decode()}. Error: {e}")
+    elif topic == MQTT_TOPIC_SETTING_LIGHT_PWM.encode():
+        try:
+            light_pwm = int(msg.decode())
+            if 0 <= light_pwm <= 100:
+                with data_lock:
+                    update_value('light_pwm', light_pwm)
+                    client.publish(MQTT_TOPIC_STATUS_LIGHT_PWM, str(light_pwm))
+            else:
+                raise ValueError("Value should be in range 0-24")
+        except ValueError as e:
+            print(f"Received invalid value: {msg.decode()}. Error: {e}")
+
+    elif topic == MQTT_TOPIC_SETTING_WTR_MAX_CNTR.encode():
+        try:
+            wtr_max_cnt = int(msg.decode())
+            if 0 < wtr_max_cnt <= 800:
+                with data_lock:
+                    update_value('wtr_max_cnt', wtr_max_cnt)
+                    client.publish(MQTT_TOPIC_STATUS_WTR_MAX_CNTR, str(wtr_max_cnt))
+            else:
+                raise ValueError("Value should be in range 0-800")
+        except ValueError as e:
+            print(f"Received invalid value: {msg.decode()}. Error: {e}")
+    elif topic == MQTT_TOPIC_SETTING_VENT_MAX_CNTR.encode():
+        try:
+            vent_max_cnt = int(msg.decode())
+            if 0 < vent_max_cnt <= 800:
+                with data_lock:
+                    update_value('day_dur', vent_max_cnt)
+                    client.publish(MQTT_TOPIC_STATUS_VENT_MAX_CNTR, str(vent_max_cnt))
+            else:
+                raise ValueError("Value should be in range 0-800")
+        except ValueError as e:
+            print(f"Received invalid value: {msg.decode()}. Error: {e}")
+    elif topic == MQTT_TOPIC_SETTING_LIGHT_AUTO.encode():
+        try:
+            light_auto = int(msg.decode())
+            if 0 <= light_auto <= 1:
+                with data_lock:
+                    update_value('light_auto', light_auto)
+                client.publish(MQTT_TOPIC_STATUS_LIGHT_AUTO, str(light_auto))
+            else:
+                raise ValueError("Value should be in range 0-1")
+        except ValueError as e:
+            print(f"Received invalid value: {msg.decode()}. Error: {e}")
+    elif topic == MQTT_TOPIC_SETTING_WATER_AUTO.encode():
+        try:
+            water_auto = int(msg.decode())
+            if 0 <= water_auto <= 1:
+                with data_lock:
+                    update_value('water_auto', water_auto)
+                client.publish(MQTT_TOPIC_STATUS_WATER_AUTO, str(water_auto))
+            else:
+                raise ValueError("Value should be in range 0-1")
+        except ValueError as e:
+            print(f"Received invalid value: {msg.decode()}. Error: {e}")
+    elif topic == MQTT_TOPIC_SETTING_VENT_AUTO.encode():
+        try:
+            vent_auto = int(msg.decode())
+            if 0 <= vent_auto <= 1:
+                with data_lock:
+                    update_value('vent_auto', vent_auto)
+                client.publish(MQTT_TOPIC_STATUS_VENT_AUTO, str(vent_auto))
+            else:
+                raise ValueError("Value should be in range 0-1")
+        except ValueError as e:
+            print(f"Received invalid value: {msg.decode()}. Error: {e}")
+    elif topic == MQTT_TOPIC_WATER_CON.encode():
+        try:
+            relay_water = int(msg.decode())
+            if 0 <= relay_water <= 1:
+                if relay_water == 1:
+                    print(f"Turn on water")
+                else:
+                    print(f"Turn off water")
+            else:
+                raise ValueError("Value should be in range 0-1")
+        except ValueError as e:
+            print(f"Received invalid value: {msg.decode()}. Error: {e}")
+    elif topic == MQTT_TOPIC_VENT_CON.encode():
+        try:
+            relay_vent = int(msg.decode())
+            if 0 <= relay_vent <= 1:
+                if relay_vent == 1:
+                    print(f"Turn on vent")
+                else:
+                    print(f"Turn off vent")
+            else:
+                raise ValueError("Value should be in range 0-1")
+        except ValueError as e:
+            print(f"Received invalid value: {msg.decode()}. Error: {e}")
+    elif topic == MQTT_TOPIC_LIGHT_CON.encode():
+        try:
+            relay_light = int(msg.decode())
+            if 0 <= relay_light <= 1:
+                if relay_light == 1:
+                    print(f"Turn on light")
+                else:
+                    print(f"Turn off light")
+            else:
+                raise ValueError("Value should be in range 0-1")
+        except ValueError as e:
+            print(f"Received invalid value: {msg.decode()}. Error: {e}")
+    elif topic == MQTT_TOPIC_REQ_ALL_SETTINGS.encode():
+        try:
+            request_settings = int(msg.decode())
+            if request_settings == 1:
+                print(f"Requested settings")
+            else:
+                raise ValueError("Value should be in range 0-1")
+        except ValueError as e:
+            print(f"Received invalid value: {msg.decode()}. Error: {e}")
+    elif topic == MQTT_TOPIC_REBOOT.encode():
+        try:
+            request_reboot = int(msg.decode())
+            if request_reboot == 1:
+                print(f"Requested reboot")
+                machine.reset()
+            else:
+                raise ValueError("Value should be in range 0-1")
+        except ValueError as e:
+            print(f"Received invalid value: {msg.decode()}. Error: {e}")
 
 def mqtt_thread():
     client.set_callback(on_message)
     client.connect()
-    client.subscribe(MQTT_TOPIC_PWM)
     print("Connected to MQTT server")
+    client.subscribe(MQTT_TOPIC_SETTING_DAY_START_HR)
+    client.subscribe(MQTT_TOPIC_SETTING_DAY_START_MIN)
+    client.subscribe(MQTT_TOPIC_SETTING_DAY_DUR)
+    client.subscribe(MQTT_TOPIC_SETTING_TIMEZONE)
+    client.subscribe(MQTT_TOPIC_SETTING_LIGHT_PWM)
+    client.subscribe(MQTT_TOPIC_SETTING_WTR_MAX_CNTR)
+    client.subscribe(MQTT_TOPIC_SETTING_VENT_MAX_CNTR)
+    client.subscribe(MQTT_TOPIC_SETTING_LIGHT_AUTO)
+    client.subscribe(MQTT_TOPIC_SETTING_WATER_AUTO)
+    client.subscribe(MQTT_TOPIC_SETTING_VENT_AUTO)
+    client.subscribe(MQTT_TOPIC_WATER_CON)
+    client.subscribe(MQTT_TOPIC_VENT_CON)
+    client.subscribe(MQTT_TOPIC_LIGHT_CON)
+    client.subscribe(MQTT_TOPIC_LIGHT_PWM)
+    client.subscribe(MQTT_TOPIC_REQ_ALL_SETTINGS)
+    client.subscribe(MQTT_TOPIC_REBOOT)
 
     while True:
         try:
             client.check_msg()
-
             with data_lock:
                 co2 = latest_data["co2"]
                 temperature = latest_data["temperature"]
                 humidity = latest_data["humidity"]
 
             if co2 is not None:
-                client.publish(MQTT_TOPIC_CO2, str(co2))
-                client.publish(MQTT_TOPIC_TEMP, str(temperature))
-                client.publish(MQTT_TOPIC_HUM, str(humidity))
+                # client.publish(MQTT_TOPIC_CO2, str(co2))
+                # client.publish(MQTT_TOPIC_TEMP, str(temperature))
+                # client.publish(MQTT_TOPIC_HUM, str(humidity))
                 print("Data sent to  MQTT")
             else:
                 print("No data to send")
@@ -258,7 +438,7 @@ def mqtt_thread():
             except:
                 pass
 
-        time.sleep(30)
+        time.sleep(10)
 
 
 # Main function
@@ -269,10 +449,10 @@ def main():
         print("Config file doesn't exist. Creating a new one.")
         save_json({})
 
-    update_value('day_start_hr', 6)
-    update_value('day_start_min', 0)
-    update_value('day_duration', 18)
-    update_value('time_zone', 7)
+    # update_value('day_start_hr', 6)
+    # update_value('day_start_min', 0)
+    # update_value('day_dur', 18)
+    # update_value('tzn', 7)
 
     wifi_scan()
 
