@@ -3,7 +3,7 @@ import os
 import time
 
 import machine
-from machine import SoftI2C, Pin, PWM, reset
+from machine import SoftI2C, Pin, PWM, reset, Timer
 from machine import RTC
 import _thread
 from umqtt.simple import MQTTClient
@@ -16,8 +16,26 @@ import urequests
 from envsensor import EnvSensor
 
 # Pin mapping
-LED_PIN = 2
+LED_PIN     = 2
+VENT_PIN    = 3
+WATER_PIN   = 4
 
+# Cycle settings
+VENT_WORK_TIME_MIN    = 1
+WATER_WORK_TIME_MIN   = 1
+
+DEFAULT_DAY_START_HR  = 6
+DEFAULT_DAY_START_MIN = 0
+DEFAULT_DAY_DUR       = 18
+DEFAULT_TIMEZONE      = 7
+DEFAULT_LIGHT_PWM     = 10
+DEFAULT_WTR_MAX_CNTR  = 48
+DEFAULT_VENT_MAX_CNTR = 48
+DEFAULT_LIGHT_AUTO    = 1
+DEFAULT_WATER_AUTO    = 1
+DEFAULT_VENT_AUTO     = 1
+
+SWVER = '5.0.0'
 
 # Wi-Fi settings
 SSID        = "ELTEX-8A08"
@@ -57,7 +75,6 @@ MQTT_TOPIC_SETTING_VENT_AUTO     = "gbu_dev_3/settings/vent_auto"
 # MQTT_TOPIC_SETTING_WTR_OFFSET    = "gbu_dev_3/settings/wtr_offset"
 # MQTT_TOPIC_SETTING_GLOB_AUTO     = "gbu_dev_3/settings/global_auto"
 
-
 # Commands topic (subscribe)
 MQTT_TOPIC_WATER_CON        = "gbu_dev_3/relay/water"
 MQTT_TOPIC_VENT_CON         = "gbu_dev_3/relay/vent"
@@ -78,14 +95,43 @@ MQTT_TOPIC_STATUS_LIGHT_AUTO    = "gbu_dev_3/status/light_auto"
 MQTT_TOPIC_STATUS_WATER_AUTO    = "gbu_dev_3/status/water_auto"
 MQTT_TOPIC_STATUS_VENT_AUTO     = "gbu_dev_3/status/vent_auto"
 
+# System topics (publish)
+MQTT_TOPIC_STATUS_IPADDR = 'gbu_dev_3/status/ip_addr'
+MQTT_TOPIC_STATUS_SWVER = 'gbu_dev_3/status/sw_ver'
+
 # Global variables and objects
 client = MQTTClient(MQTT_CLIENT_ID, MQTT_HOST, MQTT_PORT)
 latest_data = {"co2": None, "temperature": None, "humidity": None}
+system_status = {'wifi': '', 'mqtt': ''}
 data_lock = _thread.allocate_lock()
 i2c = SoftI2C(scl=Pin(33), sda=Pin(32), freq=100000)
+rtc = RTC()
 scd40_sensor = EnvSensor(i2c, 'SCD40')
 sht30_sensor = EnvSensor(i2c, 'SHT30')
 JSON_FILE = 'config.json'
+
+
+def check_schedule(equipment):
+    current_time = rtc.datetime()
+    offset_minutes = get_value('tzn') * 60
+    current_minutes = (current_time[4] * 60 + current_time[5] + offset_minutes) % 1440
+    start_minutes = get_value('day_start_hr') * 60 + get_value('day_start_min')
+    end_minutes = start_minutes + get_value('day_dur') * 60
+    print(f'start_minutes: {start_minutes}')
+    print(f'end_minutes: {end_minutes}')
+    print(f'current_minutes: {current_minutes}')
+
+    if equipment == 'light':
+
+        if start_minutes <= current_minutes < end_minutes:
+            return True
+        else:
+            return False
+    elif equipment == 'water':
+        if start_minutes + 60 <= current_minutes < end_minutes - 60:
+            return True
+        else:
+            return False
 
 def file_exists(filename):
     try:
@@ -179,6 +225,79 @@ def sensor_thread():
 
         time.sleep(5)  # Измеряем каждые 5 секунд
 
+def vent_oneshot_timer_cb(timer):
+    print('Turn off vent')
+
+def vent_thread():
+    vent_oneshot_timer = Timer(0)
+    vent_counter = 1
+    vent_work_time_ms = VENT_WORK_TIME_MIN * 60 * 1000
+
+    while True:
+        vent_counter = vent_counter + 1
+        vent_max_cnt = get_value('vent_max_cnt')
+
+        if vent_max_cnt is not None:
+            vent_period = vent_max_cnt / (24 * 60)
+            print(f'Set config value of vent_period: {vent_period}')
+        else:
+            vent_period = DEFAULT_VENT_MAX_CNTR / (24 * 60)
+            print(f'Set default vent_period: {vent_period}')
+
+        if vent_counter % vent_period == 0:
+            print('Turn on vent')
+            vent_oneshot_timer.init(period=vent_work_time_ms, mode=Timer.ONE_SHOT, callback=vent_oneshot_timer_cb)
+
+        time.sleep(60)
+
+def water_oneshot_timer_cb(timer):
+    print('Turn off water')
+
+def water_thread():
+    water_oneshot_timer = Timer(1)
+    water_counter = 1
+    water_work_time_ms = WATER_WORK_TIME_MIN * 60 * 1000
+
+    while True:
+        wtr_max_cnt = get_value('wtr_max_cnt')
+        day_dur = get_value('day_dur')
+
+        if day_dur is not None:
+            water_cycle_dur = day_dur - 2
+        else:
+            water_cycle_dur = DEFAULT_DAY_DUR - 2
+
+        if wtr_max_cnt is not None:
+            water_period = wtr_max_cnt / (water_cycle_dur * 60)
+            print(f'Set config value of vent_period: {water_period}')
+        else:
+            water_period = DEFAULT_WTR_MAX_CNTR / (water_cycle_dur * 60)
+            print(f'Set default vent_period: {water_period}')
+
+        if check_schedule('water'):
+            water_counter = water_counter + 1
+
+            if water_counter % water_period == 0:
+                print('Turn on water')
+                water_oneshot_timer.init(period=water_work_time_ms, mode=Timer.ONE_SHOT, callback=water_oneshot_timer_cb)
+
+        time.sleep(60)
+
+def light_thread():
+
+    light_pwm_pin = PWM(Pin(LED_PIN))
+
+    while True:
+        light_pwm = get_value('light_pwm')
+        if light_pwm is not None:
+            light_pwm_value_perc = light_pwm
+        else:
+            light_pwm_value_perc = DEFAULT_LIGHT_PWM
+
+        if check_schedule('light'):
+            print('Turn on light')
+            light_pwm_pin.duty(light_pwm_value_perc)
+        time.sleep(60)
 
 def time_to_minutes(time_str):
     if time_str is None:
@@ -194,36 +313,17 @@ def time_to_minutes(time_str):
     return hours * 60 + minutes
 
 # Light control class
-class LightControl:
-    def __init__(self, pin):
-        # self.led = machine.Pin(pin, machine.Pin.OUT)
+
+# TODO: Implement light, vent and pump control tasks
+
+class ControlClass:
+    def __init__(self, led_pin, vent_pin, water_pin):
+        self.led_pin = machine.Pin(led_pin, machine.Pin.OUT)
+        self.vent_pin = machine.Pin(vent_pin, machine.Pin.OUT)
+        self.water_pin = machine.Pin(water_pin, machine.Pin.OUT)
+
         # self.config = load_config()
-        self.rtc = RTC()
 
-    def update_config(self, start_time, end_time):
-        update_value('start_time', '06:00')
-        update_value('end_time', '00:00')
-
-    def check_schedule(self):
-        current_time = self.rtc.datetime()
-        offset_minutes = get_value('tzn') * 60
-        current_minutes = (current_time[4] * 60 + current_time[5] + offset_minutes) % 1440
-        start_minutes = get_value('day_start_hr') * 60 + get_value('day_start_min')
-        end_minutes = start_minutes + get_value('day_dur') * 60
-        print(f'start_minutes: {start_minutes}')
-        print(f'end_minutes: {end_minutes}')
-        print(f'current_minutes: {current_minutes}')
-        if start_minutes <= current_minutes < end_minutes:
-            # self.led.on()
-            print('Turn on light')
-        else:
-            # self.led.off()
-            print('Turn off light')
-
-    def run(self):
-        while True:
-            self.check_schedule()
-            time.sleep(60)  # Check every minute
 
 # MQTT incoming messages handler
 def on_message(topic, msg):
@@ -299,7 +399,7 @@ def on_message(topic, msg):
             vent_max_cnt = int(msg.decode())
             if 0 < vent_max_cnt <= 800:
                 with data_lock:
-                    update_value('day_dur', vent_max_cnt)
+                    update_value('vent_max_cnt', vent_max_cnt)
                     client.publish(MQTT_TOPIC_STATUS_VENT_MAX_CNTR, str(vent_max_cnt))
             else:
                 raise ValueError("Value should be in range 0-800")
@@ -394,9 +494,9 @@ def on_message(topic, msg):
         except ValueError as e:
             print(f"Received invalid value: {msg.decode()}. Error: {e}")
 
+# TODO: Put real light, vent, pump control commands
+
 def mqtt_thread():
-    client.set_callback(on_message)
-    client.connect()
     print("Connected to MQTT server")
     client.subscribe(MQTT_TOPIC_SETTING_DAY_START_HR)
     client.subscribe(MQTT_TOPIC_SETTING_DAY_START_MIN)
@@ -440,6 +540,27 @@ def mqtt_thread():
 
         time.sleep(10)
 
+def connection_manager():
+    client.set_callback(on_message)
+    while True:
+        if not connect_wifi(SSID, PASSWORD):
+            print("Couldn't connect to Wifi...")
+        system_status['wifi'] = 'connected'
+        set_rtc()
+
+        # if client.ping() is not None:
+        #     print("MQTT connection is active.")
+        # else:
+        #     print("MQTT connection is inactive, connecting...")
+        try:
+            print(f'Client connect func returned {client.connect()}')
+            system_status['mqtt'] = 'connected'
+            client.publish(MQTT_TOPIC_STATUS_SWVER, SWVER)
+            client.publish(MQTT_TOPIC_STATUS_IPADDR, SWVER)
+        except:
+            print('Unable to connect to MQTT. Check creds')
+
+        time.sleep(60)
 
 # Main function
 def main():
@@ -449,23 +570,19 @@ def main():
         print("Config file doesn't exist. Creating a new one.")
         save_json({})
 
+    # TODO: Pull data from config if it's not empty
     # update_value('day_start_hr', 6)
     # update_value('day_start_min', 0)
     # update_value('day_dur', 18)
     # update_value('tzn', 7)
 
-    wifi_scan()
-
-    if not connect_wifi(SSID, PASSWORD):
-        print("Couldn't connect to Wifi...")
-
-    set_rtc()
-
     # _thread.start_new_thread(sensor_thread, ())
-    _thread.start_new_thread(mqtt_thread, ())
-
-    light_control = LightControl(LED_PIN)
-    light_control.run()
+    # _thread.start_new_thread(mqtt_thread, ())
+    # _thread.start_new_thread(light_thread, ())
+    # _thread.start_new_thread(vent_thread, ())
+    # _thread.start_new_thread(water_thread, ())
+    _thread.start_new_thread(connection_manager, ())
+    # control_loop.run()
 
     while True:
        time.sleep(5)
