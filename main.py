@@ -6,6 +6,7 @@ import machine
 from machine import SoftI2C, Pin, PWM, reset, Timer
 from machine import RTC
 import _thread
+from collections import deque
 from umqtt.simple import MQTTClient
 import network
 import ntptime
@@ -15,10 +16,27 @@ import urequests
 
 from envsensor import EnvSensor
 
+class BoundedDeque:
+    def __init__(self, maxlen):
+        self.maxlen = maxlen
+        self.queue = deque((), maxlen)
+
+    def append(self, item):
+        if len(self.queue) >= self.maxlen:
+            self.queue.popleft()
+        self.queue.append(item)
+
+    def popleft(self):
+        return self.queue.popleft()
+
+    def __len__(self):
+        return len(self.queue)
+
 # Pin mapping
-LED_PIN     = 2
-VENT_PIN    = 3
-WATER_PIN   = 4
+LED_PIN             = 2
+VENT_PIN            = 3
+WATER_PIN           = 4
+MEASUREMENT_RATE_S  = 30
 
 # Cycle settings
 VENT_WORK_TIME_MIN    = 1
@@ -51,53 +69,53 @@ MQTT_PORT       = 1883
 MQTT_CLIENT_ID  = "gbu_dev_3"
 
 # Sensors topics (publish)
-MQTT_TOPIC_TEMP     = "gbu_dev_3/Scd40/t"
-MQTT_TOPIC_HUM      = "gbu_dev_3/Scd40/rh"
-MQTT_TOPIC_CO2      = "gbu_dev_3/Scd40/cd"
-MQTT_TOPIC_TEMP_EXT = "gbu_dev_3/Sht30/t_ext"
-MQTT_TOPIC_HUM_EXT  = "gbu_dev_3/Sht30/h_ext"
-MQTT_TOPIC_LUX      = "gbu_dev_3/Bh1750/lux"
-MQTT_TOPIC_PWM      = "gbu_dev_3/relay/light_pwm"
+MQTT_TOPIC_TEMP     = MQTT_CLIENT_ID + "/Scd40/t"
+MQTT_TOPIC_HUM      = MQTT_CLIENT_ID + "/Scd40/rh"
+MQTT_TOPIC_CO2      = MQTT_CLIENT_ID + "/Scd40/cd"
+MQTT_TOPIC_TEMP_EXT = MQTT_CLIENT_ID + "/Sht30/t_ext"
+MQTT_TOPIC_HUM_EXT  = MQTT_CLIENT_ID + "/Sht30/h_ext"
+MQTT_TOPIC_LUX      = MQTT_CLIENT_ID + "/Bh1750/lux"
+MQTT_TOPIC_PWM      = MQTT_CLIENT_ID + "/relay/light_pwm"
 
 # Settings topics (subscribe)
-MQTT_TOPIC_SETTING_DAY_START_HR  = "gbu_dev_3/settings/day_start_hr"
-MQTT_TOPIC_SETTING_DAY_START_MIN = "gbu_dev_3/settings/day_start_min"
-MQTT_TOPIC_SETTING_DAY_DUR       = "gbu_dev_3/settings/day_dur"
-MQTT_TOPIC_SETTING_TIMEZONE      = "gbu_dev_3/settings/tzn"
-MQTT_TOPIC_SETTING_LIGHT_PWM     = "gbu_dev_3/settings/light_pwm"
-MQTT_TOPIC_SETTING_WTR_MAX_CNTR  = "gbu_dev_3/settings/wtr_max_cnt"
-MQTT_TOPIC_SETTING_VENT_MAX_CNTR = "gbu_dev_3/settings/vent_max_cnt"
-MQTT_TOPIC_SETTING_LIGHT_AUTO    = "gbu_dev_3/settings/light_auto"
-MQTT_TOPIC_SETTING_WATER_AUTO    = "gbu_dev_3/settings/water_auto"
-MQTT_TOPIC_SETTING_VENT_AUTO     = "gbu_dev_3/settings/vent_auto"
+MQTT_TOPIC_SETTING_DAY_START_HR  = MQTT_CLIENT_ID + "/settings/day_start_hr"
+MQTT_TOPIC_SETTING_DAY_START_MIN = MQTT_CLIENT_ID + "/settings/day_start_min"
+MQTT_TOPIC_SETTING_DAY_DUR       = MQTT_CLIENT_ID + "/settings/day_dur"
+MQTT_TOPIC_SETTING_TIMEZONE      = MQTT_CLIENT_ID + "/settings/tzn"
+MQTT_TOPIC_SETTING_LIGHT_PWM     = MQTT_CLIENT_ID + "/settings/light_pwm"
+MQTT_TOPIC_SETTING_WTR_MAX_CNTR  = MQTT_CLIENT_ID + "/settings/wtr_max_cnt"
+MQTT_TOPIC_SETTING_VENT_MAX_CNTR = MQTT_CLIENT_ID + "/settings/vent_max_cnt"
+MQTT_TOPIC_SETTING_LIGHT_AUTO    = MQTT_CLIENT_ID + "/settings/light_auto"
+MQTT_TOPIC_SETTING_WATER_AUTO    = MQTT_CLIENT_ID + "/settings/water_auto"
+MQTT_TOPIC_SETTING_VENT_AUTO     = MQTT_CLIENT_ID + "/settings/vent_auto"
 # MQTT_TOPIC_SETTING_CO2_AUTO      = "gbu_dev_3/settings/co2_auto"
 # MQTT_TOPIC_SETTING_WTR_DUR       = "gbu_dev_3/settings/wtr_dur"
 # MQTT_TOPIC_SETTING_WTR_OFFSET    = "gbu_dev_3/settings/wtr_offset"
 # MQTT_TOPIC_SETTING_GLOB_AUTO     = "gbu_dev_3/settings/global_auto"
 
 # Commands topic (subscribe)
-MQTT_TOPIC_WATER_CON        = "gbu_dev_3/relay/water"
-MQTT_TOPIC_VENT_CON         = "gbu_dev_3/relay/vent"
-MQTT_TOPIC_LIGHT_CON        = "gbu_dev_3/relay/light"
-MQTT_TOPIC_LIGHT_PWM        = "gbu_dev_3/relay/light_pwm"
-MQTT_TOPIC_REQ_ALL_SETTINGS = "gbu_dev_3/cmd/req_all"
-MQTT_TOPIC_REBOOT           = "gbu_dev_3/cmd/reboot"
+MQTT_TOPIC_WATER_CON        = MQTT_CLIENT_ID + "gbu_dev_3/relay/water"
+MQTT_TOPIC_VENT_CON         = MQTT_CLIENT_ID + "gbu_dev_3/relay/vent"
+MQTT_TOPIC_LIGHT_CON        = MQTT_CLIENT_ID + "gbu_dev_3/relay/light"
+MQTT_TOPIC_LIGHT_PWM        = MQTT_CLIENT_ID + "gbu_dev_3/relay/light_pwm"
+MQTT_TOPIC_REQ_ALL_SETTINGS = MQTT_CLIENT_ID + "gbu_dev_3/cmd/req_all"
+MQTT_TOPIC_REBOOT           = MQTT_CLIENT_ID + "gbu_dev_3/cmd/reboot"
 
 # Status topics (publish)
-MQTT_TOPIC_STATUS_DAY_START_HR  = "gbu_dev_3/status/day_start_hr"
-MQTT_TOPIC_STATUS_DAY_START_MIN = "gbu_dev_3/status/day_start_min"
-MQTT_TOPIC_STATUS_DAY_DUR       = "gbu_dev_3/status/day_dur"
-MQTT_TOPIC_STATUS_TIMEZONE      = "gbu_dev_3/status/tzn"
-MQTT_TOPIC_STATUS_LIGHT_PWM     = "gbu_dev_3/status/light_pwm"
-MQTT_TOPIC_STATUS_WTR_MAX_CNTR  = "gbu_dev_3/status/wtr_max_cnt"
-MQTT_TOPIC_STATUS_VENT_MAX_CNTR = "gbu_dev_3/status/vent_max_cnt"
-MQTT_TOPIC_STATUS_LIGHT_AUTO    = "gbu_dev_3/status/light_auto"
-MQTT_TOPIC_STATUS_WATER_AUTO    = "gbu_dev_3/status/water_auto"
-MQTT_TOPIC_STATUS_VENT_AUTO     = "gbu_dev_3/status/vent_auto"
+MQTT_TOPIC_STATUS_DAY_START_HR  = MQTT_CLIENT_ID + "/status/day_start_hr"
+MQTT_TOPIC_STATUS_DAY_START_MIN = MQTT_CLIENT_ID + "/status/day_start_min"
+MQTT_TOPIC_STATUS_DAY_DUR       = MQTT_CLIENT_ID + "/status/day_dur"
+MQTT_TOPIC_STATUS_TIMEZONE      = MQTT_CLIENT_ID + "/status/tzn"
+MQTT_TOPIC_STATUS_LIGHT_PWM     = MQTT_CLIENT_ID + "/status/light_pwm"
+MQTT_TOPIC_STATUS_WTR_MAX_CNTR  = MQTT_CLIENT_ID + "/status/wtr_max_cnt"
+MQTT_TOPIC_STATUS_VENT_MAX_CNTR = MQTT_CLIENT_ID + "/status/vent_max_cnt"
+MQTT_TOPIC_STATUS_LIGHT_AUTO    = MQTT_CLIENT_ID + "/status/light_auto"
+MQTT_TOPIC_STATUS_WATER_AUTO    = MQTT_CLIENT_ID + "/status/water_auto"
+MQTT_TOPIC_STATUS_VENT_AUTO     = MQTT_CLIENT_ID + "/status/vent_auto"
 
 # System topics (publish)
-MQTT_TOPIC_STATUS_IPADDR = 'gbu_dev_3/status/ip_addr'
-MQTT_TOPIC_STATUS_SWVER = 'gbu_dev_3/status/sw_ver'
+MQTT_TOPIC_STATUS_IPADDR = MQTT_CLIENT_ID + "/status/ip_addr"
+MQTT_TOPIC_STATUS_SWVER = MQTT_CLIENT_ID + "/status/sw_ver"
 
 # Global variables and objects
 client = MQTTClient(MQTT_CLIENT_ID, MQTT_HOST, MQTT_PORT)
@@ -109,6 +127,8 @@ rtc = RTC()
 scd40_sensor = EnvSensor(i2c, 'SCD40')
 sht30_sensor = EnvSensor(i2c, 'SHT30')
 JSON_FILE = 'config.json'
+mqtt_queue = BoundedDeque(maxlen=20)
+queue_lock = _thread.allocate_lock()
 
 
 def check_schedule(equipment):
@@ -167,7 +187,7 @@ def connect_wifi(ssid, password, max_attempts=5, retry_delay=5):
 
     if wlan.isconnected():
         print("Already connected to WiFi")
-        return True
+        return wlan.ifconfig()[0]
 
     print(f"Connecting to WiFi network: {ssid}")
 
@@ -182,8 +202,10 @@ def connect_wifi(ssid, password, max_attempts=5, retry_delay=5):
             time.sleep(0.5)
 
         if wlan.isconnected():
-            print("WiFi connected. Network config:", wlan.ifconfig())
-            return True
+            # print("WiFi connected. Network config:", wlan.ifconfig())
+            system_status['ip_addr'] = wlan.ifconfig()[0]
+            print(f'WiFi connected, IP addr is {wlan.ifconfig()[0]}')
+            return wlan.ifconfig()[0]
         else:
             print(f"Connection attempt {attempt + 1} failed. Retrying in {retry_delay} seconds...")
             time.sleep(retry_delay)
@@ -223,7 +245,7 @@ def sensor_thread():
         except Exception as e:
             print(f"Sensor reading error: {e}")
 
-        time.sleep(5)  # Измеряем каждые 5 секунд
+        time.sleep(MEASUREMENT_RATE_S)  # Измеряем каждые MEASUREMENT_RATE_S секунд
 
 def vent_oneshot_timer_cb(timer):
     print('Turn off vent')
@@ -497,7 +519,9 @@ def on_message(topic, msg):
 # TODO: Put real light, vent, pump control commands
 
 def mqtt_thread():
-    print("Connected to MQTT server")
+    client = MQTTClient(MQTT_CLIENT_ID, MQTT_HOST, MQTT_PORT)
+    client.set_callback(on_message)
+    client.connect()
     client.subscribe(MQTT_TOPIC_SETTING_DAY_START_HR)
     client.subscribe(MQTT_TOPIC_SETTING_DAY_START_MIN)
     client.subscribe(MQTT_TOPIC_SETTING_DAY_DUR)
@@ -514,61 +538,90 @@ def mqtt_thread():
     client.subscribe(MQTT_TOPIC_LIGHT_PWM)
     client.subscribe(MQTT_TOPIC_REQ_ALL_SETTINGS)
     client.subscribe(MQTT_TOPIC_REBOOT)
-
-    while True:
-        try:
+    print("Connected to MQTT server")
+    try:
+        while True:
             client.check_msg()
-            with data_lock:
-                co2 = latest_data["co2"]
-                temperature = latest_data["temperature"]
-                humidity = latest_data["humidity"]
+            if len(mqtt_queue) > 0:
+                with queue_lock:
+                    if len(mqtt_queue) > 0:
+                        message = mqtt_queue.popleft()
+                        topic = message['topic']
+                        payload = message['payload']
+                        try:
+                            client.publish(topic, payload)
+                        except Exception as e:
+                            print(f"MQTT send error: {e}")
+                            try:
+                                client.connect()
+                            except:
+                                pass
+            time.sleep(1)
 
-            if co2 is not None:
-                # client.publish(MQTT_TOPIC_CO2, str(co2))
-                # client.publish(MQTT_TOPIC_TEMP, str(temperature))
-                # client.publish(MQTT_TOPIC_HUM, str(humidity))
-                print("Data sent to  MQTT")
-            else:
-                print("No data to send")
-        except Exception as e:
-            print(f"Error in  MQTT thread: {e}")
-            try:
-                client.connect()
-                client.subscribe(MQTT_TOPIC_PWM)
-            except:
-                pass
+    except Exception as e:
+        print(f"Error in MQTT thread: {e}")
 
-        time.sleep(10)
+    # while True:
+    #     try:
+    #         client.check_msg()
+    #         with data_lock:
+    #             co2 = latest_data["co2"]
+    #             temperature = latest_data["temperature"]
+    #             humidity = latest_data["humidity"]
+    #
+    #         if co2 is not None:
+    #             # client.publish(MQTT_TOPIC_CO2, str(co2))
+    #             # client.publish(MQTT_TOPIC_TEMP, str(temperature))
+    #             # client.publish(MQTT_TOPIC_HUM, str(humidity))
+    #             print("Data sent to  MQTT")
+    #         else:
+    #             print("No data to send")
+    #     except Exception as e:
+    #         print(f"Error in  MQTT thread: {e}")
+    #         try:
+    #             client.connect()
+    #             client.subscribe(MQTT_TOPIC_PWM)
+    #         except:
+    #             pass
+
+def send_to_mqtt(topic, payload):
+    with queue_lock:
+        if len(mqtt_queue) < mqtt_queue.maxlen:
+            mqtt_queue.append({'topic': topic, 'payload': payload})
+            return True
+        return False
 
 def connection_manager():
-    client.set_callback(on_message)
+
     while True:
-        if not connect_wifi(SSID, PASSWORD):
+        ip_addr = connect_wifi(SSID, PASSWORD)
+        if not ip_addr:
             print("Couldn't connect to Wifi...")
-        system_status['wifi'] = 'connected'
+        print(f'IP is: {ip_addr}')
         set_rtc()
 
-        # if client.ping() is not None:
-        #     print("MQTT connection is active.")
-        # else:
-        #     print("MQTT connection is inactive, connecting...")
         try:
             print(f'Client connect func returned {client.connect()}')
             system_status['mqtt'] = 'connected'
-            client.publish(MQTT_TOPIC_STATUS_SWVER, SWVER)
-            client.publish(MQTT_TOPIC_STATUS_IPADDR, SWVER)
         except:
             print('Unable to connect to MQTT. Check creds')
-
+        if system_status['mqtt'] == 'connected':
+            client.set_callback(on_message)
+            send_to_mqtt(MQTT_TOPIC_STATUS_SWVER, SWVER)
+            send_to_mqtt(MQTT_TOPIC_STATUS_IPADDR, str(ip_addr))
         time.sleep(60)
 
 # Main function
 def main():
-
     # Set default settings
     if not file_exists(JSON_FILE):
         print("Config file doesn't exist. Creating a new one.")
         save_json({})
+
+    ip_addr = connect_wifi(SSID, PASSWORD)
+    if not ip_addr:
+        print("Couldn't connect to Wifi...")
+    print(f'IP is: {ip_addr}')
 
     # TODO: Pull data from config if it's not empty
     # update_value('day_start_hr', 6)
@@ -577,11 +630,11 @@ def main():
     # update_value('tzn', 7)
 
     # _thread.start_new_thread(sensor_thread, ())
-    # _thread.start_new_thread(mqtt_thread, ())
+    _thread.start_new_thread(connection_manager, ())
+    _thread.start_new_thread(mqtt_thread, ())
     # _thread.start_new_thread(light_thread, ())
     # _thread.start_new_thread(vent_thread, ())
     # _thread.start_new_thread(water_thread, ())
-    _thread.start_new_thread(connection_manager, ())
     # control_loop.run()
 
     while True:
