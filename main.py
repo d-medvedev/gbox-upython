@@ -3,8 +3,7 @@ import os
 import time
 
 import machine
-from machine import SoftI2C, Pin, PWM, reset, Timer
-from machine import RTC
+from machine import SoftI2C, Pin, PWM, Timer, RTC
 import _thread
 from collections import deque
 from umqtt.simple import MQTTClient
@@ -14,7 +13,95 @@ import utime
 import json
 import urequests
 
-from envsensor import EnvSensor
+# Sensor class definition
+class EnvSensor:
+    # Constants
+    SCD40_ADDR = 0x62
+    SHT30_ADDR = 0x44
+
+    # SCD40 Commands
+    SCD40_START_MEASURE = 0x21B1
+    SCD40_READ_MEASURE = 0xEC05
+    SCD40_STOP_MEASURE = 0x3F86
+
+    # SHT30 Commands
+    SHT30_MEASURE_HIGH = 0x2C06
+
+    def __init__(self, i2c, sensor_type):
+        self.i2c = i2c
+        if sensor_type not in ['SCD40', 'SHT30']:
+            raise ValueError("Invalid sensor type. Choose 'SCD40' or 'SHT30'.")
+        self.sensor_type = sensor_type
+        self.addr = self.SCD40_ADDR if sensor_type == 'SCD40' else self.SHT30_ADDR
+
+    def start_measurement(self):
+        if self.sensor_type == 'SCD40':
+            self._write_command(self.SCD40_START_MEASURE)
+            time.sleep(5)  # Wait for SCD40 to initialize
+
+    def stop_measurement(self):
+        if self.sensor_type == 'SCD40':
+            self._write_command(self.SCD40_STOP_MEASURE)
+
+    def read_measurement(self):
+        if self.sensor_type == 'SCD40':
+            return self._read_scd40()
+        else:
+            return self._read_sht30()
+
+    def _read_scd40(self):
+        self._write_command(self.SCD40_READ_MEASURE)
+        time.sleep_ms(1)
+
+        data = self.i2c.readfrom(self.addr, 9)
+        co2 = struct.unpack(">H", data[0:2])[0]
+        co2_crc = data[2]
+        temp = struct.unpack(">H", data[3:5])[0]
+        temp_crc = data[5]
+        hum = struct.unpack(">H", data[6:8])[0]
+        hum_crc = data[8]
+
+        if (self._crc8(co2) != co2_crc or
+                self._crc8(temp) != temp_crc or
+                self._crc8(hum) != hum_crc):
+            raise ValueError("CRC check failed")
+
+        co2 = co2
+        temperature = -45 + 175 * (temp / 65535)
+        humidity = 100 * (hum / 65535)
+        return co2, temperature, humidity
+
+    def _read_sht30(self):
+        self._write_command(self.SHT30_MEASURE_HIGH)
+        time.sleep_ms(50)
+        data = self.i2c.readfrom(self.addr, 6)
+
+        temp = struct.unpack(">H", data[0:2])[0]
+        temp_crc = data[2]
+        hum = struct.unpack(">H", data[3:5])[0]
+        hum_crc = data[5]
+
+        if self._crc8(temp) != temp_crc or self._crc8(hum) != hum_crc:
+            raise ValueError("CRC check failed")
+
+        temperature = -45 + 175 * (temp / 65535)
+        humidity = 100 * (hum / 65535)
+        return None, temperature, humidity  # None for CO2 as SHT30 doesn't measure it
+
+    def _write_command(self, cmd):
+        self.i2c.writeto(self.addr, struct.pack(">H", cmd))
+
+    def _crc8(self, data):
+        crc = 0xFF
+        for i in range(2):
+            crc ^= (data >> (8 - i * 8)) & 0xFF
+            for _ in range(8):
+                if crc & 0x80:
+                    crc = (crc << 1) ^ 0x31
+                else:
+                    crc <<= 1
+                crc &= 0xFF
+        return crc
 
 class BoundedDeque:
     def __init__(self, maxlen):
@@ -32,26 +119,28 @@ class BoundedDeque:
     def __len__(self):
         return len(self.queue)
 
-# Pin mapping
-LED_PIN             = 2
-VENT_PIN            = 3
-WATER_PIN           = 4
+# Pin mapping for M5Stack Station
+LED_PIN             = 17
+VENT_PIN            = 25
+WATER_PIN           = 26
 MEASUREMENT_RATE_S  = 30
 
 # Cycle settings
-VENT_WORK_TIME_MIN    = 1
+VENT_WORK_TIME_MIN    = 3
 WATER_WORK_TIME_MIN   = 1
 
 DEFAULT_DAY_START_HR  = 6
 DEFAULT_DAY_START_MIN = 0
 DEFAULT_DAY_DUR       = 18
 DEFAULT_TIMEZONE      = 7
-DEFAULT_LIGHT_PWM     = 10
-DEFAULT_WTR_MAX_CNTR  = 48
-DEFAULT_VENT_MAX_CNTR = 48
+DEFAULT_LIGHT_PWM     = 20
+DEFAULT_WTR_MAX_CNTR  = 2
+DEFAULT_VENT_MAX_CNTR = 72
 DEFAULT_LIGHT_AUTO    = 1
 DEFAULT_WATER_AUTO    = 1
 DEFAULT_VENT_AUTO     = 1
+
+VENT_PWM_VALUE        = 100
 
 SWVER = '5.0.0'
 
@@ -122,14 +211,14 @@ client = MQTTClient(MQTT_CLIENT_ID, MQTT_HOST, MQTT_PORT)
 latest_data = {"co2": None, "temperature": None, "humidity": None}
 system_status = {'wifi': '', 'mqtt': ''}
 data_lock = _thread.allocate_lock()
-i2c = SoftI2C(scl=Pin(33), sda=Pin(32), freq=100000)
+i2c_instance = SoftI2C(scl=Pin(33), sda=Pin(32), freq=100000)
 rtc = RTC()
-scd40_sensor = EnvSensor(i2c, 'SCD40')
-sht30_sensor = EnvSensor(i2c, 'SHT30')
 JSON_FILE = 'config.json'
 mqtt_queue = BoundedDeque(maxlen=20)
 queue_lock = _thread.allocate_lock()
-
+vent_pwm_pin = PWM(Pin(VENT_PIN))
+light_pwm_pin = PWM(Pin(LED_PIN))
+water_pin = Pin(WATER_PIN)
 
 def check_schedule(equipment):
     current_time = rtc.datetime()
@@ -229,6 +318,8 @@ def set_rtc():
         print('Failed to sync time')
 
 def sensor_thread():
+    scd40_sensor = EnvSensor(i2c_instance, 'SCD40')
+    sht30_sensor = EnvSensor(i2c_instance, 'SHT30')
     scd40_sensor.start_measurement()
     while True:
         try:
@@ -245,9 +336,10 @@ def sensor_thread():
         except Exception as e:
             print(f"Sensor reading error: {e}")
 
-        time.sleep(MEASUREMENT_RATE_S)  # Измеряем каждые MEASUREMENT_RATE_S секунд
+        time.sleep(MEASUREMENT_RATE_S)
 
 def vent_oneshot_timer_cb(timer):
+    vent_pwm_pin.duty(0)
     print('Turn off vent')
 
 def vent_thread():
@@ -256,24 +348,23 @@ def vent_thread():
     vent_work_time_ms = VENT_WORK_TIME_MIN * 60 * 1000
 
     while True:
-        vent_counter = vent_counter + 1
         vent_max_cnt = get_value('vent_max_cnt')
 
-        if vent_max_cnt is not None:
-            vent_period = vent_max_cnt / (24 * 60)
-            print(f'Set config value of vent_period: {vent_period}')
-        else:
-            vent_period = DEFAULT_VENT_MAX_CNTR / (24 * 60)
-            print(f'Set default vent_period: {vent_period}')
+        if get_value('vent_auto'):
+            vent_counter = vent_counter + 1
+            vent_period = (24 * 60) / vent_max_cnt
+            print(f'Set vent_period from json: {vent_period}')
 
-        if vent_counter % vent_period == 0:
-            print('Turn on vent')
-            vent_oneshot_timer.init(period=vent_work_time_ms, mode=Timer.ONE_SHOT, callback=vent_oneshot_timer_cb)
+            if vent_counter % vent_period == 0:
+                vent_pwm_pin.duty(VENT_PWM_VALUE)
+                print('Turn on vent')
+                vent_oneshot_timer.init(period=vent_work_time_ms, mode=Timer.ONE_SHOT, callback=vent_oneshot_timer_cb)
 
         time.sleep(60)
 
 def water_oneshot_timer_cb(timer):
     print('Turn off water')
+    water_pin.off()
 
 def water_thread():
     water_oneshot_timer = Timer(1)
@@ -284,41 +375,35 @@ def water_thread():
         wtr_max_cnt = get_value('wtr_max_cnt')
         day_dur = get_value('day_dur')
 
-        if day_dur is not None:
-            water_cycle_dur = day_dur - 2
-        else:
-            water_cycle_dur = DEFAULT_DAY_DUR - 2
-
-        if wtr_max_cnt is not None:
-            water_period = wtr_max_cnt / (water_cycle_dur * 60)
-            print(f'Set config value of vent_period: {water_period}')
-        else:
-            water_period = DEFAULT_WTR_MAX_CNTR / (water_cycle_dur * 60)
-            print(f'Set default vent_period: {water_period}')
-
-        if check_schedule('water'):
+        if get_value('water_auto'):
             water_counter = water_counter + 1
+            water_cycle_dur = day_dur - 2
+            water_period = (water_cycle_dur * 60) / wtr_max_cnt
+            print(f'Set water period based on json: {water_period}')
 
-            if water_counter % water_period == 0:
-                print('Turn on water')
-                water_oneshot_timer.init(period=water_work_time_ms, mode=Timer.ONE_SHOT, callback=water_oneshot_timer_cb)
+            if check_schedule('water'):
+                if water_counter % water_period == 0:
+                    print('Turn on water')
+                    water_pin.on()
+                    water_oneshot_timer.init(period=water_work_time_ms, mode=Timer.ONE_SHOT, callback=water_oneshot_timer_cb)
 
         time.sleep(60)
 
 def light_thread():
 
-    light_pwm_pin = PWM(Pin(LED_PIN))
-
     while True:
-        light_pwm = get_value('light_pwm')
-        if light_pwm is not None:
-            light_pwm_value_perc = light_pwm
-        else:
-            light_pwm_value_perc = DEFAULT_LIGHT_PWM
+        if get_value('light_auto'):
+            light_pwm = get_value('light_pwm')
+            if light_pwm is not None:
+                light_pwm_value_perc = light_pwm
+                print(f'Set light_pwm from json: {light_pwm}')
+            else:
+                light_pwm_value_perc = DEFAULT_LIGHT_PWM
+                print(f'Set default light_pwm: {light_pwm}')
 
-        if check_schedule('light'):
-            print('Turn on light')
-            light_pwm_pin.duty(light_pwm_value_perc)
+            if check_schedule('light'):
+                print('Turn on light')
+                light_pwm_pin.duty(light_pwm_value_perc)
         time.sleep(60)
 
 def time_to_minutes(time_str):
@@ -334,19 +419,6 @@ def time_to_minutes(time_str):
 
     return hours * 60 + minutes
 
-# Light control class
-
-# TODO: Implement light, vent and pump control tasks
-
-class ControlClass:
-    def __init__(self, led_pin, vent_pin, water_pin):
-        self.led_pin = machine.Pin(led_pin, machine.Pin.OUT)
-        self.vent_pin = machine.Pin(vent_pin, machine.Pin.OUT)
-        self.water_pin = machine.Pin(water_pin, machine.Pin.OUT)
-
-        # self.config = load_config()
-
-
 # MQTT incoming messages handler
 def on_message(topic, msg):
     if topic == MQTT_TOPIC_SETTING_DAY_START_HR.encode():
@@ -355,7 +427,7 @@ def on_message(topic, msg):
             if 0 <= day_start_hr < 24:
                 with data_lock:
                     update_value('day_start_hr', day_start_hr)
-                    client.publish(MQTT_TOPIC_STATUS_DAY_START_HR, str(day_start_hr))
+                    send_to_mqtt(MQTT_TOPIC_STATUS_DAY_START_HR, str(day_start_hr))
             else:
                 raise ValueError("Value should be in range 0-23")
         except ValueError as e:
@@ -366,7 +438,7 @@ def on_message(topic, msg):
             if 0 <= day_start_min < 60:
                 with data_lock:
                     update_value('day_start_min', day_start_min)
-                    client.publish(MQTT_TOPIC_STATUS_DAY_START_MIN, str(day_start_min))
+                    send_to_mqtt(MQTT_TOPIC_STATUS_DAY_START_MIN, str(day_start_min))
             else:
                 raise ValueError("Value should be in range 0-60")
         except ValueError as e:
@@ -377,7 +449,7 @@ def on_message(topic, msg):
             if 0 <= day_dur < 24:
                 with data_lock:
                     update_value('day_dur', day_dur)
-                    client.publish(MQTT_TOPIC_STATUS_DAY_DUR, str(day_dur))
+                    send_to_mqtt(MQTT_TOPIC_STATUS_DAY_DUR, str(day_dur))
             else:
                 raise ValueError("Value should be in range 0-24")
         except ValueError as e:
@@ -388,7 +460,7 @@ def on_message(topic, msg):
             if 0 <= tzn < 24:
                 with data_lock:
                     update_value('tzn', tzn)
-                    client.publish(MQTT_TOPIC_STATUS_TIMEZONE, str(tzn))
+                    send_to_mqtt(MQTT_TOPIC_STATUS_TIMEZONE, str(tzn))
             else:
                 raise ValueError("Value should be in range 0-24")
         except ValueError as e:
@@ -399,7 +471,7 @@ def on_message(topic, msg):
             if 0 <= light_pwm <= 100:
                 with data_lock:
                     update_value('light_pwm', light_pwm)
-                    client.publish(MQTT_TOPIC_STATUS_LIGHT_PWM, str(light_pwm))
+                    send_to_mqtt(MQTT_TOPIC_STATUS_LIGHT_PWM, str(light_pwm))
             else:
                 raise ValueError("Value should be in range 0-24")
         except ValueError as e:
@@ -411,7 +483,7 @@ def on_message(topic, msg):
             if 0 < wtr_max_cnt <= 800:
                 with data_lock:
                     update_value('wtr_max_cnt', wtr_max_cnt)
-                    client.publish(MQTT_TOPIC_STATUS_WTR_MAX_CNTR, str(wtr_max_cnt))
+                    send_to_mqtt(MQTT_TOPIC_STATUS_WTR_MAX_CNTR, str(wtr_max_cnt))
             else:
                 raise ValueError("Value should be in range 0-800")
         except ValueError as e:
@@ -433,7 +505,7 @@ def on_message(topic, msg):
             if 0 <= light_auto <= 1:
                 with data_lock:
                     update_value('light_auto', light_auto)
-                client.publish(MQTT_TOPIC_STATUS_LIGHT_AUTO, str(light_auto))
+                send_to_mqtt(MQTT_TOPIC_STATUS_LIGHT_AUTO, str(light_auto))
             else:
                 raise ValueError("Value should be in range 0-1")
         except ValueError as e:
@@ -444,7 +516,7 @@ def on_message(topic, msg):
             if 0 <= water_auto <= 1:
                 with data_lock:
                     update_value('water_auto', water_auto)
-                client.publish(MQTT_TOPIC_STATUS_WATER_AUTO, str(water_auto))
+                send_to_mqtt(MQTT_TOPIC_STATUS_WATER_AUTO, str(water_auto))
             else:
                 raise ValueError("Value should be in range 0-1")
         except ValueError as e:
@@ -455,7 +527,7 @@ def on_message(topic, msg):
             if 0 <= vent_auto <= 1:
                 with data_lock:
                     update_value('vent_auto', vent_auto)
-                client.publish(MQTT_TOPIC_STATUS_VENT_AUTO, str(vent_auto))
+                send_to_mqtt(MQTT_TOPIC_STATUS_VENT_AUTO, str(vent_auto))
             else:
                 raise ValueError("Value should be in range 0-1")
         except ValueError as e:
@@ -515,8 +587,6 @@ def on_message(topic, msg):
                 raise ValueError("Value should be in range 0-1")
         except ValueError as e:
             print(f"Received invalid value: {msg.decode()}. Error: {e}")
-
-# TODO: Put real light, vent, pump control commands
 
 def mqtt_thread():
     client = MQTTClient(MQTT_CLIENT_ID, MQTT_HOST, MQTT_PORT)
@@ -611,31 +681,35 @@ def connection_manager():
             send_to_mqtt(MQTT_TOPIC_STATUS_IPADDR, str(ip_addr))
         time.sleep(60)
 
-# Main function
-def main():
+def init_settings():
     # Set default settings
     if not file_exists(JSON_FILE):
         print("Config file doesn't exist. Creating a new one.")
         save_json({})
+        # Set default value after file creation
+        update_value('day_start_hr', DEFAULT_DAY_START_HR)
+        update_value('day_start_min', DEFAULT_DAY_START_MIN)
+        update_value('day_dur', DEFAULT_DAY_DUR)
+        update_value('tzn', DEFAULT_TIMEZONE)
+        update_value('light_pwm', DEFAULT_LIGHT_PWM)
+        update_value('wtr_max_cnt', DEFAULT_WTR_MAX_CNTR)
+        update_value('vent_max_cnt', DEFAULT_VENT_MAX_CNTR)
+        update_value('light_auto', DEFAULT_LIGHT_AUTO)
+        update_value('water_auto', DEFAULT_WATER_AUTO)
+        update_value('vent_auto', DEFAULT_VENT_AUTO)
 
-    ip_addr = connect_wifi(SSID, PASSWORD)
-    if not ip_addr:
-        print("Couldn't connect to Wifi...")
-    print(f'IP is: {ip_addr}')
+# Main function
+def main():
 
-    # TODO: Pull data from config if it's not empty
-    # update_value('day_start_hr', 6)
-    # update_value('day_start_min', 0)
-    # update_value('day_dur', 18)
-    # update_value('tzn', 7)
+    init_settings()
+    connect_wifi(SSID, PASSWORD)
 
+    _thread.start_new_thread(light_thread, ())
     # _thread.start_new_thread(sensor_thread, ())
-    _thread.start_new_thread(connection_manager, ())
-    _thread.start_new_thread(mqtt_thread, ())
-    # _thread.start_new_thread(light_thread, ())
-    # _thread.start_new_thread(vent_thread, ())
-    # _thread.start_new_thread(water_thread, ())
-    # control_loop.run()
+    # _thread.start_new_thread(connection_manager, ())
+    # _thread.start_new_thread(mqtt_thread, ())
+    _thread.start_new_thread(vent_thread, ())
+    _thread.start_new_thread(water_thread, ())
 
     while True:
        time.sleep(5)
