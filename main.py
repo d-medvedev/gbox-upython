@@ -732,17 +732,19 @@ def main():
     connect_wifi(SSID, PASSWORD)
     sync_time()
 
-    # _thread.start_new_thread(light_thread, ())
-    # _thread.start_new_thread(sensor_thread, ())
-    # _thread.start_new_thread(mqtt_thread, ())
-    # _thread.start_new_thread(vent_thread, ())
-    # _thread.start_new_thread(water_thread, ())
-    _thread.start_new_thread(update_check_task, ())
+    _thread.start_new_thread(light_thread, ())
+    _thread.start_new_thread(sensor_thread, ())
+    _thread.start_new_thread(mqtt_thread, ())
+    _thread.start_new_thread(vent_thread, ())
+    _thread.start_new_thread(water_thread, ())
+    # _thread.start_new_thread(update_check_task, ())
     # _thread.start_new_thread(connection_manager, ())
 
     while True:
         gc.collect()
-        print(f'Free memrory: {gc.mem_free()}')
+        print(f'\r\nFree memory: {gc.mem_free()}')
+        print(f'\r\nAllocated memory: {gc.mem_alloc()}')
+
         time.sleep(5)
 
 if __name__ == "__main__":
