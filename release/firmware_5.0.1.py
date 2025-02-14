@@ -148,8 +148,8 @@ SSID        = "ELTEX-8A08"
 PASSWORD    = "GP21204758"
 
 # OTA Server Settings
-SERVER_URL = "http://178.236.244.174:5000"
-CURRENT_VERSION = "5.0.0"
+SERVER_URL      = "http://192.168.1.188:5000"
+CURRENT_VERSION = "5.0.1"
 
 # MQTT settings
 MQTT_HOST       = "dev.rightech.io"
@@ -732,17 +732,16 @@ def main():
     connect_wifi(SSID, PASSWORD)
     sync_time()
 
-    # _thread.start_new_thread(light_thread, ())
-    # _thread.start_new_thread(sensor_thread, ())
-    # _thread.start_new_thread(mqtt_thread, ())
-    # _thread.start_new_thread(vent_thread, ())
-    # _thread.start_new_thread(water_thread, ())
+    _thread.start_new_thread(light_thread, ())
+    _thread.start_new_thread(sensor_thread, ())
+    _thread.start_new_thread(mqtt_thread, ())
+    _thread.start_new_thread(vent_thread, ())
+    _thread.start_new_thread(water_thread, ())
     _thread.start_new_thread(update_check_task, ())
     # _thread.start_new_thread(connection_manager, ())
 
     while True:
         gc.collect()
-        print(f'Free memrory: {gc.mem_free()}')
         time.sleep(5)
 
 if __name__ == "__main__":
