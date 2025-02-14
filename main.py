@@ -3,7 +3,7 @@ import os
 import time
 import struct
 import machine
-from machine import SoftI2C, Pin, PWM, Timer, RTC
+from machine import I2C, Pin, PWM, Timer, RTC
 import _thread
 from collections import deque
 from umqtt.simple import MQTTClient
@@ -208,14 +208,14 @@ MQTT_TOPIC_STATUS_SWVER = MQTT_CLIENT_ID + "/status/sw_ver"
 
 # Global variables and objects
 data_lock = _thread.allocate_lock()
-i2c_instance = SoftI2C(scl=Pin(33), sda=Pin(32), freq=100000)
+
 rtc = RTC()
 JSON_FILE = 'config.json'
 mqtt_queue = BoundedDeque(maxlen=20)
 queue_lock = _thread.allocate_lock()
-vent_pwm_pin = PWM(Pin(VENT_PIN))
-light_pwm_pin = PWM(Pin(LED_PIN))
-water_pin = Pin(WATER_PIN)
+# vent_pwm_pin = PWM(Pin(VENT_PIN))
+# light_pwm_pin = PWM(Pin(LED_PIN))
+# water_pin = Pin(WATER_PIN)
 
 def check_for_update():
     print("Проверка обновлений...")
@@ -236,6 +236,7 @@ def check_for_update():
 
 def download_update():
     try:
+        gc.collect()
         response = urequests.get(f"{SERVER_URL}/update")
         if response.status_code == 200:
             update_files = response.json()
@@ -353,6 +354,7 @@ def sync_time():
         print('Failed to sync time')
 
 def sensor_thread():
+    i2c_instance = I2C(0, scl=Pin(15), sda=Pin(13), freq=100000)
     scd40_sensor = EnvSensor(i2c_instance, 'SCD40')
     # sht30_sensor = EnvSensor(i2c_instance, 'SHT30')
     scd40_sensor.start_measurement()
@@ -732,12 +734,12 @@ def main():
     connect_wifi(SSID, PASSWORD)
     sync_time()
 
-    _thread.start_new_thread(light_thread, ())
-    _thread.start_new_thread(sensor_thread, ())
-    _thread.start_new_thread(mqtt_thread, ())
-    _thread.start_new_thread(vent_thread, ())
-    _thread.start_new_thread(water_thread, ())
-    # _thread.start_new_thread(update_check_task, ())
+    # _thread.start_new_thread(light_thread, ())
+    # _thread.start_new_thread(sensor_thread, ())
+    # _thread.start_new_thread(mqtt_thread, ())
+    # _thread.start_new_thread(vent_thread, ())
+    # _thread.start_new_thread(water_thread, ())
+    _thread.start_new_thread(update_check_task, ())
     # _thread.start_new_thread(connection_manager, ())
 
     while True:
