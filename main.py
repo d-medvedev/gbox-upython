@@ -13,6 +13,9 @@ import utime
 import json
 import urequests
 
+DEVICE_NAME = 'gbu_dev_3'
+CURRENT_VERSION = "5.0.1"
+
 class EnvSensor:
     # Constants
     SCD40_ADDR = 0x62
@@ -114,12 +117,19 @@ class BoundedDeque:
     def __len__(self):
         return len(self.queue)
 
+JSON_FILE = 'config.json'
+mqtt_queue = BoundedDeque(maxlen=20)
+queue_lock = _thread.allocate_lock()
+
 system = {
-    'pinout': {
-        'lamp':  17,
-        'vent':  25,
-        'pump':  26,
-        'swver': '5.0.0'
+    'main': {
+        'lamp_pin':  17,
+        'vent_pin':  25,
+        'pump_pin':  26,
+        'sda':   32,
+        'scl':   33,
+        'swver': CURRENT_VERSION,
+        'base_topic': DEVICE_NAME,
     },
     'default_settings': {
         'day_start_hr':  6,
@@ -145,33 +155,27 @@ system = {
         'pass': "GP21204758",
         'ota' : "http://178.236.244.174:5000"
     },
-    'mqtt': {
+    'mqtt_creds': {
         'host':  "dev.rightech.io",
         'port':  1883,
-        'cl_id': "gbu_dev_3"
+        'cl_id': DEVICE_NAME,
+    },
+    'mqtt_topics_sub': {
+        'sgs_topic': '/settings',
+        'cmd_topic': '/commands',
+    },
+    'mqtt_topics_pub':         {
+        'sts_topic': '/status',
+        'sns_topic': '/sensors'
     }
 }
 
-mqtt_topics_sensors = [
-    't','rh','cd','t_ext','h_ext','lux'
-]
-
-mqtt_topics = [
-    'light_pwm', 'day_start_hr','day_start_min','day_start_min','tzn',
-    'wtr_max_cnt','vent_max_cnt','light_auto','water_auto','vent_auto',
-    'ip_addr','sw_ver'
-]
-
-# Global variables and objects
-data_lock = _thread.allocate_lock()
-i2c_instance = SoftI2C(scl=Pin(33), sda=Pin(32), freq=100000)
-JSON_FILE = 'config.json'
-mqtt_queue = BoundedDeque(maxlen=20)
-queue_lock = _thread.allocate_lock()
-
 def check_for_update():
+    ota_url = system['network']['ota']
+    swver =  system['main']['swver']
+    print(f"\nCurrent sw ver is: {swver}")
     try:
-        response = urequests.get(f"{OTA_URL}/check_update?version={SWVER}")
+        response = urequests.get(f"{ota_url}/check_update?version={swver}")
         if response.status_code == 200:
             update_info = response.json()
             if update_info.get('update_available', False):
@@ -186,8 +190,9 @@ def check_for_update():
     return False
 
 def download_update():
+    ota_url = system['network']['ota']
     try:
-        response = urequests.get(f"{OTA_URL}/update")
+        response = urequests.get(f"{ota_url}/update")
         if response.status_code == 200:
             update_files = response.json()
             for file_name, file_content in update_files.items():
@@ -305,7 +310,10 @@ def sync_time():
         print('Failed to sync time')
 
 def sensor_thread():
-    scd40_sensor = EnvSensor(i2c_instance, 'SCD40')
+    i2c = SoftI2C(scl=Pin(system['pinout']['scl']),
+                  sda=Pin(system['pinout']['sda']),
+                  freq=100000)
+    scd40_sensor = EnvSensor(i2c, 'SCD40')
     # sht30_sensor = EnvSensor(i2c_instance, 'SHT30')
     scd40_sensor.start_meas()
     while True:
@@ -319,15 +327,15 @@ def sensor_thread():
         except Exception as e:
             print(f"Sensor reading error: {e}")
 
-        time.sleep(MEAS_RATE_S)
+        time.sleep(system['timers']['meas_rate_s'])
 
-def light_thread():
-    light_pwm_pin = PWM(Pin(system['pinout']['lamp']))
-    light_pwm_pin.freq(system['timers]']['pwm_freq_hz'])
+def lamp_thread():
+    light_pwm_pin = PWM(Pin(system['main']['lamp_pin']))
+    light_pwm_pin.freq(system['timers']['pwm_freq_hz'])
     light_pwm_pin.duty(0)
     while True:
         if get_value('light_auto'):
-            light_pwm_value_perc = get_value('light_pwm')
+            light_pwm_value_perc = get_value('lamp_pwm')
             print(f'Set light_pwm from json: {light_pwm_value_perc}')
 
             if check_schedule('light'):
@@ -342,11 +350,11 @@ def vent_oneshot_timer_cb(timer):
 
 def vent_thread():
     global vent_pwm_pin
-    vent_pwm_pin = PWM(Pin(system['pinout']['vent']))
+    vent_pwm_pin = PWM(Pin(system['main']['vent_pin']))
     vent_oneshot_timer = Timer(0)
     vent_counter = 1
     vent_work_time_ms = system['timers']['pump_dur_min'] * 60 * 1000
-    vent_pwm_pin.freq(system['timers]']['pwm_freq_hz'])
+    vent_pwm_pin.freq(system['timers']['pwm_freq_hz'])
     vent_pwm_pin.duty(0)
 
     while True:
@@ -358,7 +366,7 @@ def vent_thread():
             print(f'Set vent_period from json: {vent_period}')
 
             if vent_counter % vent_period == 0:
-                vent_pwm_pin.duty(int(1024 * system['default_settings']['VNT_PWM_VAL'] / 100))
+                vent_pwm_pin.duty(int(1024 * system['default_settings']['vent_pwm_val'] / 100))
                 print('Turn on vent')
                 vent_oneshot_timer.init(period=vent_work_time_ms,
                                         mode=Timer.ONE_SHOT,
@@ -371,7 +379,7 @@ def pump_oneshot_timer_cb(timer):
 
 def pump_thread():
     global pump_pin
-    pump_pin = Pin(system['pinout']['pump'])
+    pump_pin = Pin(system['main']['pump_pin'])
     water_oneshot_timer = Timer(1)
     water_counter = 1
     water_work_time_ms = system['timers']['pump_dur_min'] * 60 * 1000
@@ -413,24 +421,81 @@ def init_settings():
         for key, value in system['default_settings'].items():
             update_value(key, value)
 
+def on_message(topic, msg):
+    if topic == (system['main']['base_topic'] + system['mqtt_topics_sub']['sgs_topic']).encode():
+        try:
+            config = json.loads(msg)
+            current_config = {}
+            try:
+                with open('config.json', 'r') as f:
+                    current_config = json.load(f)
+            except:
+                pass
+
+            current_config.update(config)
+
+            with open('config.json', 'w') as f:
+                json.dump(current_config, f)
+
+            print("Config updated successfully")
+
+        except Exception as e:
+            print(f"Error updating config: {e}")
+
+def mqtt_thread():
+
+    client = MQTTClient(system['mqtt_creds']['cl_id'],
+                        system['mqtt_creds']['host'],
+                        system['mqtt_creds']['port'])
+
+    client.set_callback(on_message)
+    client.connect()
+    print("MQTT connected!")
+
+    for topic in system['mqtt_topics_sub'].values():
+        topic = system['main']['base_topic'] + topic
+        client.subscribe(topic)
+        print(f'Subscribed to : {topic}')
+    try:
+        while True:
+            client.check_msg()
+            if len(mqtt_queue) > 0:
+                with queue_lock:
+                    if len(mqtt_queue) > 0:
+                        message = mqtt_queue.popleft()
+                        topic = message['topic']
+                        payload = message['payload']
+                        try:
+                            client.publish(topic, payload)
+                        except Exception as e:
+                            print(f"MQTT send error: {e}")
+                            # try:
+                            #     client.connect()
+                            # except:
+                            #     pass
+            time.sleep(1)
+
+    except Exception as e:
+        print(f"Error in MQTT thread: {e}")
+
 def main():
 
     init_settings()
     connect_wifi(system['network']['ssid'], system['network']['pass'])
     sync_time()
 
-    # _thread.start_new_thread(lamp_thread, ())
+    _thread.start_new_thread(lamp_thread, ())
     # _thread.start_new_thread(sensor_thread, ())
-    # _thread.start_new_thread(mqtt_thread, ())
-    # _thread.start_new_thread(vent_thread, ())
-    # _thread.start_new_thread(pump_thread, ())
-    # _thread.start_new_thread(update_check_task, ())
+    _thread.start_new_thread(mqtt_thread, ())
+    _thread.start_new_thread(vent_thread, ())
+    _thread.start_new_thread(pump_thread, ())
+    _thread.start_new_thread(update_check_task, ())
     # _thread.start_new_thread(connection_manager, ())
 
     while True:
         gc.collect()
-        print(f'\r\nFree memory: {gc.mem_free()}')
-        print(f'\r\nAllocated memory: {gc.mem_alloc()}')
+        # print(f'\r\nFree memory: {gc.mem_free()}')
+        # print(f'\r\nAllocated memory: {gc.mem_alloc()}')
 
         time.sleep(5)
 
