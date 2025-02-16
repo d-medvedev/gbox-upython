@@ -127,8 +127,8 @@ system = {
         'lamp_pin':  17,
         'vent_pin':  25,
         'pump_pin':  26,
-        'sda':   32,
-        'scl':   33,
+        'sda_pin':   32,
+        'scl_pin':   33,
         'swver': CURRENT_VERSION,
         'base_topic': DEVICE_NAME,
     },
@@ -311,18 +311,26 @@ def sync_time():
         print('Failed to sync time')
 
 def sensor_thread():
-    i2c = SoftI2C(scl=Pin(system['pinout']['scl']),
-                  sda=Pin(system['pinout']['sda']),
+    i2c = SoftI2C(scl=Pin(system['main']['scl_pin']),
+                  sda=Pin(system['main']['sda_pin']),
                   freq=100000)
-    scd40_sensor = EnvSensor(i2c, 'SCD40')
+    scd40 = EnvSensor(i2c, 'SCD40')
     # sht30_sensor = EnvSensor(i2c_instance, 'SHT30')
-    scd40_sensor.start_meas()
+    scd40.start_meas()
     while True:
         try:
-            co2, temperature, humidity = scd40_sensor.read_meas()
+            co2, t, rh = scd40.read_meas()
 
             if co2 is not None:
-                print(f"CO2: {co2} ppm, Temperature: {temperature:.2f}°C, Humidity: {humidity:.2f}%")
+                data = {
+                    'co2': co2,
+                    't': t,
+                    'rh': rh
+                }
+                send_topic = (system['main']['base_topic'] + system['mqtt_topics_pub']['sns_topic'])
+                payload = json_str = json.dumps(data)
+                send_to_mqtt(send_topic, payload)
+                print(f"CO2: {co2} ppm, Temperature: {t:.2f}°C, Humidity: {rh:.2f}%")
             else:
                 print("Sensor read error")
         except Exception as e:
@@ -530,27 +538,25 @@ def mqtt_thread():
         topic = system['main']['base_topic'] + topic
         client.subscribe(topic)
         print(f'Subscribed to : {topic}')
-    try:
-        while True:
-            client.check_msg()
-            if len(mqtt_queue) > 0:
-                with queue_lock:
-                    if len(mqtt_queue) > 0:
-                        message = mqtt_queue.popleft()
-                        topic = message['topic']
-                        payload = message['payload']
-                        try:
-                            client.publish(topic, payload)
-                        except Exception as e:
-                            print(f"MQTT send error: {e}")
-                            # try:
-                            #     client.connect()
-                            # except:
-                            #     pass
-            time.sleep(1)
 
-    except Exception as e:
-        print(f"Error in MQTT thread: {e}")
+    while True:
+        client.check_msg()
+        if len(mqtt_queue) > 0:
+            with queue_lock:
+                if len(mqtt_queue) > 0:
+                    message = mqtt_queue.popleft()
+                    topic = message['topic']
+                    payload = message['payload']
+                    try:
+                        client.publish(topic, payload)
+                    except Exception as e:
+                        print(f"MQTT send error: {e}")
+                        # try:
+                        #     client.connect()
+                        # except:
+                        #     pass
+        time.sleep(1)
+
 
 def main():
 
@@ -559,7 +565,7 @@ def main():
     sync_time()
 
     _thread.start_new_thread(lamp_thread, ())
-    # _thread.start_new_thread(sensor_thread, ())
+    _thread.start_new_thread(sensor_thread, ())
     _thread.start_new_thread(mqtt_thread, ())
     _thread.start_new_thread(vent_thread, ())
     _thread.start_new_thread(pump_thread, ())
