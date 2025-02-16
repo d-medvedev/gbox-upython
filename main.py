@@ -1,5 +1,6 @@
 import gc
 import os
+import re
 import time
 import struct
 import machine
@@ -336,10 +337,10 @@ def lamp_thread():
     while True:
         if get_value('light_auto'):
             light_pwm_value_perc = get_value('lamp_pwm')
-            print(f'Set light_pwm from json: {light_pwm_value_perc}')
+            print(f'\nSet light_pwm from json: {light_pwm_value_perc}')
 
             if check_schedule('light'):
-                print('Turn on light')
+                print('\nTurn on light')
                 light_pwm_pin.duty(int(1024 * light_pwm_value_perc / 100))
 
         time.sleep(60)
@@ -421,26 +422,99 @@ def init_settings():
         for key, value in system['default_settings'].items():
             update_value(key, value)
 
+def validate_value(key, value):
+    ranges = {'day_start_hr': (0,24), 'day_start_min': (0,59), 'day_dur': (0,24),
+              'tzn': (-12,12), 'lamp_pwm': (0,100), 'wtr_max_cnt': (1,5),
+              'vent_max_cnt': (1,100), 'vent_pwm_val': (0,100),
+              'light_auto': (0,1), 'wtr_auto': (0,1), 'vent_auto': (0,1)}
+    return (ranges[key][0] <= value <= ranges[key][1],
+            None if ranges[key][0] <= value <= ranges[key][1]
+            else f"Value {value} is out of range ({ranges[key][0]}-{ranges[key][1]})")
+
 def on_message(topic, msg):
     if topic == (system['main']['base_topic'] + system['mqtt_topics_sub']['sgs_topic']).encode():
         try:
-            config = json.loads(msg)
+            msg_str = msg.decode('utf-8')
+
+            msg_str = msg_str.replace(':,', ':null,')
+            msg_str = msg_str.replace(':}', ':null}')
+            msg_str = msg_str.replace(': ,', ':null,')
+            msg_str = msg_str.replace(': }', ':null}')
+            msg_str = ' '.join(msg_str.split())
+
+            try:
+                new_config = json.loads(msg_str)
+            except json.JSONDecodeError as e:
+                print(f"Error: Invalid JSON format - {e}")
+                return
+
             current_config = {}
+
             try:
                 with open('config.json', 'r') as f:
                     current_config = json.load(f)
-            except:
-                pass
+            except Exception as e:
+                print(f"Warning: Could not load current config - {e}")
 
-            current_config.update(config)
+            updates = {}
+            skipped = []
+            validation_errors = []
 
-            with open('config.json', 'w') as f:
-                json.dump(current_config, f)
+            for key in system['default_settings'].keys():
+                if key in new_config:
+                    value = new_config[key]
+                    if value is not None:
+                        try:
+                            if isinstance(value, (int, float)):
+                                is_valid, error_msg = validate_value(key, int(value))
+                                if is_valid:
+                                    updates[key] = int(value)
+                                else:
+                                    validation_errors.append(f"{key}: {error_msg}")
+                                    skipped.append(key)
+                            else:
+                                skipped.append(key)
+                        except (ValueError, TypeError):
+                            skipped.append(key)
+                    else:
+                        skipped.append(key)
+                else:
+                    skipped.append(key)
 
-            print("Config updated successfully")
+            if updates:
+                current_config.update(updates)
+
+                try:
+                    with open('config.json', 'w') as f:
+                        json.dump(current_config, f)
+                    print(f"\nSuccessfully updated {len(updates)} settings:")
+                    for key, value in sorted(updates.items()):
+                        print(f"- {key}: {value}")
+                    send_topic = (system['main']['base_topic'] + system['mqtt_topics_pub']['sts_topic'])
+                    payload = json_str = json.dumps(current_config)
+                    send_to_mqtt(send_topic, payload)
+                except Exception as e:
+                    print(f"Error saving config: {e}")
+
+                if validation_errors:
+                    print("\nValidation errors:")
+                    for error in validation_errors:
+                        print(f"- {error}")
+
+                if skipped:
+                    print(f"\nSkipped {len(skipped)} invalid or empty values:")
+                    for key in sorted(skipped):
+                        if key not in [err.split(':')[0] for err in validation_errors]:
+                            print(f"- {key}")
+            else:
+                print("No valid updates received")
+                if validation_errors:
+                    print("\nValidation errors:")
+                    for error in validation_errors:
+                        print(f"- {error}")
 
         except Exception as e:
-            print(f"Error updating config: {e}")
+            print(f"Error processing message: {e}")
 
 def mqtt_thread():
 
@@ -494,8 +568,8 @@ def main():
 
     while True:
         gc.collect()
-        # print(f'\r\nFree memory: {gc.mem_free()}')
-        # print(f'\r\nAllocated memory: {gc.mem_alloc()}')
+        print(f'\r\nFree memory: {gc.mem_free()}')
+        print(f'\r\nAllocated memory: {gc.mem_alloc()}')
 
         time.sleep(5)
 
