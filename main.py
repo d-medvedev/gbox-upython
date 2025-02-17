@@ -1,6 +1,5 @@
 import gc
 import os
-import re
 import time
 import struct
 import machine
@@ -60,9 +59,9 @@ class EnvSensor:
         hum = struct.unpack(">H", data[6:8])[0]
         hum_crc = data[8]
 
-        if (self._crc8(co2) != co2_crc or
-                self._crc8(temp) != temp_crc or
-                self._crc8(hum) != hum_crc):
+        if (self._crc_8(co2) != co2_crc or
+                self._crc_8(temp) != temp_crc or
+                self._crc_8(hum) != hum_crc):
             raise ValueError("CRC check failed")
 
         co2 = co2
@@ -80,7 +79,7 @@ class EnvSensor:
         hum = struct.unpack(">H", data[3:5])[0]
         hum_crc = data[5]
 
-        if self._crc8(temp) != temp_crc or self._crc8(hum) != hum_crc:
+        if self._crc_8(temp) != temp_crc or self._crc_8(hum) != hum_crc:
             raise ValueError("CRC check failed")
 
         temp = -45 + 175 * (temp / 65535)
@@ -90,7 +89,8 @@ class EnvSensor:
     def _write_command(self, cmd):
         self.i2c.writeto(self.addr, struct.pack(">H", cmd))
 
-    def _crc8(self, data):
+    @staticmethod
+    def _crc_8(data):
         crc = 0xFF
         for i in range(2):
             crc ^= (data >> (8 - i * 8)) & 0xFF
@@ -170,6 +170,9 @@ system = {
         'sns_topic': '/sensors'
     }
 }
+
+vent_pwm_pin = PWM(Pin(system['main']['vent_pin']))
+pump_pin = Pin(system['main']['pump_pin'])
 
 def check_for_update():
     ota_url = system['network']['ota']
@@ -285,7 +288,7 @@ def connect_wifi(ssid, password, max_attempts=5, retry_delay=5):
             time.sleep(0.5)
 
         if wlan.isconnected():
-            # print("WiFi connected. Network config:", wlan.ifconfig())
+            # print("Wi-Fi connected. Network config:", wlan.ifconfig())
             print(f'WiFi connected, IP addr is {wlan.ifconfig()[0]}')
             return wlan.ifconfig()[0]
         else:
@@ -307,28 +310,31 @@ def sync_time():
     try:
         ntptime.settime()
         print('Time synced with NTP server')
-    except:
-        print('Failed to sync time')
+    except Exception as e:
+        print(f'Failed to sync time: Unexpected error - {e}')
 
 def sensor_thread():
     i2c = SoftI2C(scl=Pin(system['main']['scl_pin']),
                   sda=Pin(system['main']['sda_pin']),
                   freq=100000)
     scd40 = EnvSensor(i2c, 'SCD40')
-    # sht30_sensor = EnvSensor(i2c_instance, 'SHT30')
+    sht30 = EnvSensor(i2c, 'SHT30')
     scd40.start_meas()
     while True:
         try:
             co2, t, rh = scd40.read_meas()
+            t_ext, rh_ext = 0, 0 #sht30.read_meas()
 
             if co2 is not None:
                 data = {
                     'co2': co2,
                     't': t,
-                    'rh': rh
+                    'rh': rh,
+                    't_ext': t_ext,
+                    'rh_ext': rh_ext
                 }
                 send_topic = (system['main']['base_topic'] + system['mqtt_topics_pub']['sns_topic'])
-                payload = json_str = json.dumps(data)
+                payload = json.dumps(data)
                 send_to_mqtt(send_topic, payload)
                 print(f"CO2: {co2} ppm, Temperature: {t:.2f}°C, Humidity: {rh:.2f}%")
             else:
@@ -353,13 +359,11 @@ def lamp_thread():
 
         time.sleep(60)
 
-def vent_oneshot_timer_cb(timer):
+def vent_oneshot_timer_cb(_timer):
     vent_pwm_pin.duty(0)
     print('Turn off vent')
 
 def vent_thread():
-    global vent_pwm_pin
-    vent_pwm_pin = PWM(Pin(system['main']['vent_pin']))
     vent_oneshot_timer = Timer(0)
     vent_counter = 1
     vent_work_time_ms = system['timers']['pump_dur_min'] * 60 * 1000
@@ -382,13 +386,11 @@ def vent_thread():
                                         callback=vent_oneshot_timer_cb)
         time.sleep(60)
 
-def pump_oneshot_timer_cb(timer):
+def pump_oneshot_timer_cb(_timer):
     print('Turn off water')
     pump_pin.off()
 
 def pump_thread():
-    global pump_pin
-    pump_pin = Pin(system['main']['pump_pin'])
     water_oneshot_timer = Timer(1)
     water_counter = 1
     water_work_time_ms = system['timers']['pump_dur_min'] * 60 * 1000
@@ -452,8 +454,8 @@ def on_message(topic, msg):
 
             try:
                 new_config = json.loads(msg_str)
-            except json.JSONDecodeError as e:
-                print(f"Error: Invalid JSON format - {e}")
+            except ValueError as e:
+                print(f"Error: Invalid value in JSON - {e}")
                 return
 
             current_config = {}
@@ -499,7 +501,7 @@ def on_message(topic, msg):
                     for key, value in sorted(updates.items()):
                         print(f"- {key}: {value}")
                     send_topic = (system['main']['base_topic'] + system['mqtt_topics_pub']['sts_topic'])
-                    payload = json_str = json.dumps(current_config)
+                    payload = json.dumps(current_config)
                     send_to_mqtt(send_topic, payload)
                 except Exception as e:
                     print(f"Error saving config: {e}")
