@@ -124,11 +124,11 @@ queue_lock = _thread.allocate_lock()
 
 system = {
     'main': {
-        'lamp_pin':  17,
-        'vent_pin':  25,
-        'pump_pin':  26,
-        'sda_pin':   32,
-        'scl_pin':   33,
+        'lamp_pin':  2,  # m5 - 17
+        'vent_pin':  15, # m5 - 25
+        'pump_pin':  17, # m5 - 26
+        'sda_pin':   32, # 32 - m5,
+        'scl_pin':   33, # 33 - m5,
         'swver': CURRENT_VERSION,
         'base_topic': DEVICE_NAME,
     },
