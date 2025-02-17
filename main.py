@@ -125,7 +125,7 @@ queue_lock = _thread.allocate_lock()
 system = {
     'main': {
         'lamp_pin':  2,  # m5 - 17
-        'vent_pin':  15, # m5 - 25
+        'vent_pin':  16, # m5 - 25
         'pump_pin':  17, # m5 - 26
         'sda_pin':   32, # 32 - m5,
         'scl_pin':   33, # 33 - m5,
@@ -171,6 +171,7 @@ system = {
     }
 }
 
+light_pwm_pin = PWM(Pin(system['main']['lamp_pin']))
 vent_pwm_pin = PWM(Pin(system['main']['vent_pin']))
 pump_pin = Pin(system['main']['pump_pin'])
 
@@ -345,7 +346,6 @@ def sensor_thread():
         time.sleep(system['timers']['meas_rate_s'])
 
 def lamp_thread():
-    light_pwm_pin = PWM(Pin(system['main']['lamp_pin']))
     light_pwm_pin.freq(system['timers']['pwm_freq_hz'])
     light_pwm_pin.duty(0)
     while True:
@@ -368,7 +368,7 @@ def vent_thread():
     vent_counter = 1
     vent_work_time_ms = system['timers']['pump_dur_min'] * 60 * 1000
     vent_pwm_pin.freq(system['timers']['pwm_freq_hz'])
-    vent_pwm_pin.duty(0)
+    vent_pwm_pin.duty(10)
 
     while True:
         vent_max_cnt = get_value('vent_max_cnt')
@@ -441,16 +441,20 @@ def validate_value(key, value):
             None if ranges[key][0] <= value <= ranges[key][1]
             else f"Value {value} is out of range ({ranges[key][0]}-{ranges[key][1]})")
 
+def json_replace_errors(msg):
+    msg_str = msg.decode('utf-8')
+
+    msg_str = msg_str.replace(':,', ':null,')
+    msg_str = msg_str.replace(':}', ':null}')
+    msg_str = msg_str.replace(': ,', ':null,')
+    msg_str = msg_str.replace(': }', ':null}')
+    msg_str = ' '.join(msg_str.split())
+    return msg_str
+
 def on_message(topic, msg):
     if topic == (system['main']['base_topic'] + system['mqtt_topics_sub']['sgs_topic']).encode():
         try:
-            msg_str = msg.decode('utf-8')
-
-            msg_str = msg_str.replace(':,', ':null,')
-            msg_str = msg_str.replace(':}', ':null}')
-            msg_str = msg_str.replace(': ,', ':null,')
-            msg_str = msg_str.replace(': }', ':null}')
-            msg_str = ' '.join(msg_str.split())
+            msg_str = json_replace_errors(msg)
 
             try:
                 new_config = json.loads(msg_str)
@@ -522,6 +526,33 @@ def on_message(topic, msg):
                     print("\nValidation errors:")
                     for error in validation_errors:
                         print(f"- {error}")
+
+        except Exception as e:
+            print(f"Error processing message: {e}")
+
+    if topic == (system['main']['base_topic'] + system['mqtt_topics_sub']['cmd_topic']).encode():
+        try:
+            msg_str = json_replace_errors(msg)
+
+            try:
+                command = json.loads(msg_str)
+            except ValueError as e:
+                print(f"Error: Invalid value in JSON - {e}")
+                return
+
+            print(f'Received command: {command}')
+
+            try:
+                if 'lamp_pwm' in command:
+                    lamp_value = max(0, min(100, command['lamp_pwm']))
+                    light_pwm_pin.duty(int(1024 * lamp_value / 100))
+                elif 'vent_pwm' in command:
+                    vent_value = max(0, min(100, command['vent_pwm']))
+                    vent_pwm_pin.duty(int(1024 * vent_value / 100))
+                elif 'pump' in command:
+                    pump_status = pump_pin.on() if command['pump'].lower() == 'on' else pump_pin.off()
+            except Exception as e:
+                print(f"Error processing packet: {e}")
 
         except Exception as e:
             print(f"Error processing message: {e}")
