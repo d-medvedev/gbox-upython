@@ -12,9 +12,11 @@ import ntptime
 import utime
 import json
 import urequests
+import neopixel
 
 DEVICE_NAME = 'gbu_dev_3'
 CURRENT_VERSION = "5.0.1"
+NUM_PIXELS = 7
 
 class EnvSensor:
     # Constants
@@ -124,11 +126,11 @@ queue_lock = _thread.allocate_lock()
 
 system = {
     'main': {
-        'lamp_pin':  2,  # m5 - 17
-        'vent_pin':  16, # m5 - 25
-        'pump_pin':  17, # m5 - 26
-        'sda_pin':   32, # 32 - m5,
-        'scl_pin':   33, # 33 - m5,
+        'lamp_pin':  17,  # m5 - 17, cg - 2
+        'vent_pin':  25, # m5 - 25, cg - 16
+        'pump_pin':  26, # m5 - 26, cg - 17
+        'sda_pin':   32, # 32 - m5 = cg
+        'scl_pin':   33, # 33 - m5 = cg
         'swver': CURRENT_VERSION,
         'base_topic': DEVICE_NAME,
     },
@@ -174,6 +176,12 @@ system = {
 light_pwm_pin = PWM(Pin(system['main']['lamp_pin']))
 vent_pwm_pin = PWM(Pin(system['main']['vent_pin']))
 pump_pin = Pin(system['main']['pump_pin'])
+np = neopixel.NeoPixel(Pin(4),NUM_PIXELS)
+
+def set_color(r, g, b):
+    for i in range(NUM_PIXELS):
+        np[i] = (r, g, b)
+    np.write()
 
 def check_for_update():
     ota_url = system['network']['ota']
@@ -546,11 +554,14 @@ def on_message(topic, msg):
                 if 'lamp_pwm' in command:
                     lamp_value = max(0, min(100, command['lamp_pwm']))
                     light_pwm_pin.duty(int(1024 * lamp_value / 100))
-                elif 'vent_pwm' in command:
+                if 'vent_pwm' in command:
                     vent_value = max(0, min(100, command['vent_pwm']))
                     vent_pwm_pin.duty(int(1024 * vent_value / 100))
-                elif 'pump' in command:
-                    pump_status = pump_pin.on() if command['pump'].lower() == 'on' else pump_pin.off()
+                if 'pump' in command:
+                    if command['pump'] == 'on':
+                        pump_pin.on()
+                    else:
+                        pump_pin.off()
             except Exception as e:
                 print(f"Error processing packet: {e}")
 
@@ -594,7 +605,9 @@ def mqtt_thread():
 def main():
 
     init_settings()
+    set_color(127, 0, 0)
     connect_wifi(system['network']['ssid'], system['network']['pass'])
+    set_color(0, 0, 127)
     sync_time()
 
     _thread.start_new_thread(lamp_thread, ())
