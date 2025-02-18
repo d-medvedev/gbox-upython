@@ -175,12 +175,13 @@ system = {
 
 light_pwm_pin = PWM(Pin(system['main']['lamp_pin']))
 vent_pwm_pin = PWM(Pin(system['main']['vent_pin']))
-pump_pin = Pin(system['main']['pump_pin'])
+pump_pin = Pin(system['main']['pump_pin'], Pin.OUT)
+
 np = neopixel.NeoPixel(Pin(4),NUM_PIXELS)
 
-def set_color(r, g, b):
-    for i in range(NUM_PIXELS):
-        np[i] = (r, g, b)
+def set_color(r, g, b, i):
+    # for i in range(NUM_PIXELS):
+    np[i] = (r, g, b)
     np.write()
 
 def check_for_update():
@@ -277,11 +278,13 @@ def get_value(key, default=None):
     return data.get(key, default)
 
 def connect_wifi(ssid, password, max_attempts=5, retry_delay=5):
+    set_color(255, 0, 0, 3)
     wlan = network.WLAN(network.STA_IF)
     wlan.active(True)
 
     if wlan.isconnected():
         print("Already connected to WiFi")
+        set_color(0, 255, 0, 3)
         return wlan.ifconfig()[0]
 
     print(f"Connecting to WiFi network: {ssid}")
@@ -299,6 +302,7 @@ def connect_wifi(ssid, password, max_attempts=5, retry_delay=5):
         if wlan.isconnected():
             # print("Wi-Fi connected. Network config:", wlan.ifconfig())
             print(f'WiFi connected, IP addr is {wlan.ifconfig()[0]}')
+            set_color(0, 255, 0, 3)
             return wlan.ifconfig()[0]
         else:
             print(f"Connection attempt {attempt + 1} failed. Retrying in {retry_delay} seconds...")
@@ -364,6 +368,7 @@ def lamp_thread():
             if check_schedule('light'):
                 print('\nTurn on light')
                 light_pwm_pin.duty(int(1024 * light_pwm_value_perc / 100))
+                set_color(0, 0, int(light_pwm_value_perc), 4)
 
         time.sleep(60)
 
@@ -460,6 +465,7 @@ def json_replace_errors(msg):
     return msg_str
 
 def on_message(topic, msg):
+    print(topic, msg)
     if topic == (system['main']['base_topic'] + system['mqtt_topics_sub']['sgs_topic']).encode():
         try:
             msg_str = json_replace_errors(msg)
@@ -548,20 +554,22 @@ def on_message(topic, msg):
                 print(f"Error: Invalid value in JSON - {e}")
                 return
 
-            print(f'Received command: {command}')
-
             try:
                 if 'lamp_pwm' in command:
                     lamp_value = max(0, min(100, command['lamp_pwm']))
                     light_pwm_pin.duty(int(1024 * lamp_value / 100))
+                    set_color(0,0,lamp_value,4)
                 if 'vent_pwm' in command:
                     vent_value = max(0, min(100, command['vent_pwm']))
                     vent_pwm_pin.duty(int(1024 * vent_value / 100))
+                    set_color(0,0,vent_value,1)
                 if 'pump' in command:
                     if command['pump'] == 'on':
                         pump_pin.on()
+                        set_color(0, 0, 100, 5)
                     else:
                         pump_pin.off()
+                        set_color(0, 0, 0, 5)
             except Exception as e:
                 print(f"Error processing packet: {e}")
 
@@ -605,9 +613,7 @@ def mqtt_thread():
 def main():
 
     init_settings()
-    set_color(127, 0, 0)
     connect_wifi(system['network']['ssid'], system['network']['pass'])
-    set_color(0, 0, 127)
     sync_time()
 
     _thread.start_new_thread(lamp_thread, ())
@@ -615,7 +621,7 @@ def main():
     _thread.start_new_thread(mqtt_thread, ())
     _thread.start_new_thread(vent_thread, ())
     _thread.start_new_thread(pump_thread, ())
-    _thread.start_new_thread(update_check_task, ())
+    # _thread.start_new_thread(update_check_task, ())
     # _thread.start_new_thread(connection_manager, ())
 
     while True:
