@@ -15,7 +15,7 @@ import urequests
 import neopixel
 
 DEVICE_NAME = 'gbu_dev_3'
-CURRENT_VERSION = "5.0.1"
+CURRENT_VERSION = "0.0.1"
 NUM_PIXELS = 7
 
 class EnvSensor:
@@ -187,7 +187,6 @@ system = {
 light_pwm_pin = PWM(Pin(system['main']['lamp_pin']))
 vent_pwm_pin = PWM(Pin(system['main']['vent_pin']))
 pump_pin = Pin(system['main']['pump_pin'], Pin.OUT)
-
 np = neopixel.NeoPixel(Pin(4),NUM_PIXELS)
 
 def set_color(r, g, b, i):
@@ -226,7 +225,7 @@ def download_update():
                 print(f"Файл {file_name} обновлен")
             return True
         else:
-            print("Error:", response.status_code)
+            print("Error response status:", response.status_code)
     except Exception as e:
         print("Error:", str(e))
     return False
@@ -636,14 +635,12 @@ def main():
     _thread.start_new_thread(mqtt_thread, ())
     _thread.start_new_thread(vent_thread, ())
     _thread.start_new_thread(pump_thread, ())
-    # _thread.start_new_thread(update_check_task, ())
+    _thread.start_new_thread(update_check_task, ())
     # _thread.start_new_thread(connection_manager, ())
 
     while True:
         gc.collect()
         print(f'\r\nFree memory: {gc.mem_free()}')
-        print(f'\r\nAllocated memory: {gc.mem_alloc()}')
-
         time.sleep(5)
 
 if __name__ == "__main__":
