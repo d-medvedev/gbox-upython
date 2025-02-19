@@ -22,6 +22,7 @@ class EnvSensor:
     # Constants
     SCD40_ADDR = 0x62
     SHT30_ADDR = 0x44
+    BH1750_ADDR = 0x23
 
     # SCD40 Commands
     SCD40_START_MEAS = 0x21B1
@@ -33,7 +34,7 @@ class EnvSensor:
 
     def __init__(self, i2c, sensor_type):
         self.i2c = i2c
-        if sensor_type not in ['SCD40', 'SHT30']:
+        if sensor_type not in ['SCD40', 'SHT30', 'BH1750']:
             raise ValueError("Invalid sensor type. Choose 'SCD40' or 'SHT30'.")
         self.sensor_type = sensor_type
         self.addr = self.SCD40_ADDR if sensor_type == 'SCD40' else self.SHT30_ADDR
@@ -46,8 +47,10 @@ class EnvSensor:
     def read_meas(self):
         if self.sensor_type == 'SCD40':
             return self._read_scd40()
-        else:
+        elif self.sensor_type == 'SHT30':
             return self._read_sht30()
+        elif self.sensor_type == 'BH1750':
+            return self._read_bh1750()
 
     def _read_scd40(self):
         self._write_command(self.SCD40_READ_MEAS)
@@ -87,6 +90,14 @@ class EnvSensor:
         temp = -45 + 175 * (temp / 65535)
         hum = 100 * (hum / 65535)
         return None, temp, hum  # None for CO2 as SHT30 doesn't measure it
+
+    def _read_bh1750(self):
+        self.i2c.writeto(self.BH1750_ADDR, bytes([0x20]))
+        time.sleep_ms(200)
+        data = self.i2c.readfrom(self.BH1750_ADDR, 2)
+        lux = (data[0] << 8 | data[1]) / 1.2
+        return lux
+
 
     def _write_command(self, cmd):
         self.i2c.writeto(self.addr, struct.pack(">H", cmd))
@@ -331,11 +342,14 @@ def sensor_thread():
                   sda=Pin(system['main']['sda_pin']),
                   freq=100000)
     scd40 = EnvSensor(i2c, 'SCD40')
+    bh1750 = EnvSensor(i2c, 'BH1750')
     sht30 = EnvSensor(i2c, 'SHT30')
+
     scd40.start_meas()
     while True:
         try:
             co2, t, rh = scd40.read_meas()
+            lux = bh1750.read_meas()
             t_ext, rh_ext = 0, 0 #sht30.read_meas()
 
             if co2 is not None:
@@ -343,13 +357,14 @@ def sensor_thread():
                     'co2': co2,
                     't': t,
                     'rh': rh,
+                    'lux': lux,
                     't_ext': t_ext,
                     'rh_ext': rh_ext
                 }
                 send_topic = (system['main']['base_topic'] + system['mqtt_topics_pub']['sns_topic'])
                 payload = json.dumps(data)
                 send_to_mqtt(send_topic, payload)
-                print(f"CO2: {co2} ppm, Temperature: {t:.2f}°C, Humidity: {rh:.2f}%")
+                print(f"CO2: {co2} ppm, Temp: {t:.2f}°C, Hum: {rh:.2f}%, Lux: {lux: .1f}")
             else:
                 print("Sensor read error")
         except Exception as e:
