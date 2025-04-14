@@ -16,7 +16,7 @@ import neopixel
 # from uzlib import decompress
 
 DEVICE_NAME = 'gbu_dev_3'
-CURRENT_VERSION = "5.0.2"
+CURRENT_VERSION = "5.0.3"
 NUM_PIXELS = 7
 
 class EnvSensor:
@@ -503,7 +503,7 @@ def init_settings():
 def validate_value(key, value):
     ranges = {'day_start_hr': (0,24), 'day_start_min': (0,59), 'day_dur': (0,24),
               'tzn': (-12,12), 'lamp_pwm': (0,100), 'wtr_max_cnt': (1,100),
-              'vent_max_cnt': (1,100), 'vent_pwm_val': (0,100),
+              'vent_max_cnt': (1,288), 'vent_pwm_val': (0,100),
               'light_auto': (0,1), 'wtr_auto': (0,1), 'vent_auto': (0,1)}
     return (ranges[key][0] <= value <= ranges[key][1],
             None if ranges[key][0] <= value <= ranges[key][1]
