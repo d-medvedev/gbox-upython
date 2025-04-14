@@ -13,9 +13,10 @@ import utime
 import json
 import urequests
 import neopixel
+# from uzlib import decompress
 
 DEVICE_NAME = 'gbu_dev_3'
-CURRENT_VERSION = "0.0.1"
+CURRENT_VERSION = "5.0.2"
 NUM_PIXELS = 7
 
 class EnvSensor:
@@ -137,9 +138,9 @@ queue_lock = _thread.allocate_lock()
 
 system = {
     'main': {
-        'lamp_pin':  17,  # m5 - 17, cg - 2
-        'vent_pin':  25, # m5 - 25, cg - 16
-        'pump_pin':  26, # m5 - 26, cg - 17
+        'lamp_pin':  2,  # m5 - 17, cg - 2
+        'vent_pin':  15, # m5 - 25, cg - 15
+        'pump_pin':  17, # m5 - 26, cg - 17
         'sda_pin':   32, # 32 - m5 = cg
         'scl_pin':   33, # 33 - m5 = cg
         'swver': CURRENT_VERSION,
@@ -230,6 +231,42 @@ def download_update():
         print("Error:", str(e))
     return False
 
+
+# def unzip(zip_file, extract_dir=None):
+#     if extract_dir is None:
+#         extract_dir = '/'
+#
+#     try:
+#         os.mkdir(extract_dir)
+#     except:
+#         pass
+#
+#     with open(zip_file, 'rb') as f:
+#         while True:
+#             header = f.read(30)
+#             if len(header) < 30:
+#                 break
+#
+#             signature = int.from_bytes(header[0:4], 'little')
+#             if signature != 0x04034b50:  # ZIP signature
+#                 break
+#
+#             name_length = int.from_bytes(header[26:28], 'little')
+#             extra_length = int.from_bytes(header[28:30], 'little')
+#             name = f.read(name_length).decode()
+#             if extra_length:
+#                 f.read(extra_length)
+#
+#             compressed_data = f.read()
+#             data = decompress(compressed_data)
+#
+#             full_path = extract_dir + '/' + name
+#
+#             with open(full_path, 'wb') as out_file:
+#                 out_file.write(data)
+#
+#             print(f"Распакован файл: {name}")
+
 def update_check_task():
     while True:
         if check_for_update():
@@ -254,7 +291,7 @@ def check_schedule(equipment):
             return True
         else:
             return False
-    elif equipment == 'water':
+    if equipment == 'water':
         if start_min + 60 <= cur_min < end_min - 60:
             return True
         else:
@@ -392,7 +429,7 @@ def vent_oneshot_timer_cb(_timer):
 
 def vent_thread():
     vent_oneshot_timer = Timer(0)
-    vent_counter = 1
+    vent_counter = 0
     vent_work_time_ms = system['timers']['pump_dur_min'] * 60 * 1000
     vent_pwm_pin.freq(system['timers']['pwm_freq_hz'])
     vent_pwm_pin.duty(10)
@@ -403,7 +440,7 @@ def vent_thread():
         if get_value('vent_auto'):
             vent_counter = vent_counter + 1
             vent_period = (24 * 60) / vent_max_cnt
-            print(f'Set vent_period from json: {vent_period}')
+            print(f'\nSet vent_period from json: {vent_period}')
 
             if vent_counter % vent_period == 0:
                 vent_pwm_pin.duty(int(1024 * system['default_settings']['vent_pwm_val'] / 100))
@@ -414,28 +451,32 @@ def vent_thread():
         time.sleep(60)
 
 def pump_oneshot_timer_cb(_timer):
-    print('Turn off water')
+    print('\nTurn off water')
     pump_pin.off()
 
 def pump_thread():
     water_oneshot_timer = Timer(1)
-    water_counter = 1
+    water_counter = 0
     water_work_time_ms = system['timers']['pump_dur_min'] * 60 * 1000
+    print('\nTurn off pump in case it is on')
     pump_pin.off()
 
     while True:
         wtr_max_cnt = get_value('wtr_max_cnt')
         day_dur = get_value('day_dur')
 
-        if get_value('water_auto'):
+        if get_value('wtr_auto'):
             water_counter = water_counter + 1
+            print(f'\nWatering counter: {water_counter}')
             water_cycle_dur = day_dur - 2
-            water_period = (water_cycle_dur * 60) / wtr_max_cnt
-            print(f'Set water period based on json: {water_period}')
+            water_period = round((water_cycle_dur * 60) / wtr_max_cnt)
+            print(f'\nSet water period: {water_period}')
 
             if check_schedule('water'):
-                if water_counter % water_period == 0:
-                    print('Turn on water')
+                print(f'\nCheck schedule succeed')
+                print(f'\nwater_counter % water_period equals to: {water_counter % water_period}')
+                if (water_counter % water_period) == 0:
+                    print('Turn on pump')
                     pump_pin.on()
                     water_oneshot_timer.init(period=water_work_time_ms,
                                              mode=Timer.ONE_SHOT,
@@ -461,7 +502,7 @@ def init_settings():
 
 def validate_value(key, value):
     ranges = {'day_start_hr': (0,24), 'day_start_min': (0,59), 'day_dur': (0,24),
-              'tzn': (-12,12), 'lamp_pwm': (0,100), 'wtr_max_cnt': (1,5),
+              'tzn': (-12,12), 'lamp_pwm': (0,100), 'wtr_max_cnt': (1,100),
               'vent_max_cnt': (1,100), 'vent_pwm_val': (0,100),
               'light_auto': (0,1), 'wtr_auto': (0,1), 'vent_auto': (0,1)}
     return (ranges[key][0] <= value <= ranges[key][1],
@@ -571,11 +612,11 @@ def on_message(topic, msg):
             try:
                 if 'lamp_pwm' in command:
                     lamp_value = max(0, min(100, command['lamp_pwm']))
-                    light_pwm_pin.duty(int(1024 * lamp_value / 100))
+                    light_pwm_pin.duty(int(1023 * lamp_value / 100))
                     set_color(0,0,lamp_value,4)
                 if 'vent_pwm' in command:
                     vent_value = max(0, min(100, command['vent_pwm']))
-                    vent_pwm_pin.duty(int(1024 * vent_value / 100))
+                    vent_pwm_pin.duty(int(1023 * vent_value / 100))
                     set_color(0,0,vent_value,1)
                 if 'pump' in command:
                     if command['pump'] == 'on':
@@ -623,7 +664,6 @@ def mqtt_thread():
                         #     pass
         time.sleep(1)
 
-
 def main():
 
     init_settings()
@@ -635,7 +675,7 @@ def main():
     _thread.start_new_thread(mqtt_thread, ())
     _thread.start_new_thread(vent_thread, ())
     _thread.start_new_thread(pump_thread, ())
-    _thread.start_new_thread(update_check_task, ())
+    # _thread.start_new_thread(update_check_task, ())
     # _thread.start_new_thread(connection_manager, ())
 
     while True:
